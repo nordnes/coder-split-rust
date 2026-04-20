@@ -530,6 +530,60 @@ pub struct ConnectionLogListFilter {
     pub offset: u32,
 }
 
+/// Row inserted into `connection_logs`. Mirrors
+/// `database.UpsertConnectionLogParams` in
+/// `coder/coderd/database/queries/connectionlogs.sql` — the `ON CONFLICT`
+/// clause on `(connection_id, workspace_id, agent_name)` means a second
+/// insert with `connection_status = "disconnected"` updates the
+/// `disconnect_time`, `disconnect_reason`, and `code` of the matching
+/// row instead of creating a duplicate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertConnectionLogInput {
+    /// Stable row identifier for the connect event. The upsert matches
+    /// on `(connection_id, workspace_id, agent_name)`, so the caller
+    /// may freely generate a fresh UUID for every report.
+    pub id: Uuid,
+    /// Time the connect (or disconnect) event occurred.
+    pub time: OffsetDateTime,
+    /// Connection lifecycle status — `"connected"` or `"disconnected"`.
+    /// When `"disconnected"`, the store upserts `disconnect_time`,
+    /// `disconnect_reason`, and `code` onto any existing matching row.
+    pub connection_status: String,
+    /// Organization that owns the workspace.
+    pub organization_id: Uuid,
+    /// Owner of the workspace.
+    pub workspace_owner_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Workspace name (denormalized for retention-safe reporting).
+    pub workspace_name: String,
+    /// Agent name inside the workspace.
+    pub agent_name: String,
+    /// Connection type: `ssh`, `vscode`, `jetbrains`, `reconnecting_pty`,
+    /// `workspace_app`, or `port_forwarding`.
+    pub connection_type: String,
+    /// Client IP address. Stored as a Postgres `inet`.
+    pub ip: String,
+    /// Either the SSH exit code or the HTTP status code of the web
+    /// request. Only set for disconnect events on SSH-like connections;
+    /// ignored (kept NULL in the DB) on connect events.
+    pub code: Option<i32>,
+    /// User-Agent header for web events. `None` for SSH events.
+    pub user_agent: Option<String>,
+    /// Authenticated user who initiated a web connection. `None` for
+    /// SSH events (the agent cannot attribute the session).
+    pub user_id: Option<Uuid>,
+    /// App slug or forwarded port. `None` for SSH events.
+    pub slug_or_port: Option<String>,
+    /// SSH connection identifier reported by the agent. `None` for web
+    /// events (workspace_app / port_forwarding).
+    pub connection_id: Option<Uuid>,
+    /// Human-readable reason attached to a disconnect event. `None` on
+    /// connect and on disconnect events where the agent reported no
+    /// reason.
+    pub disconnect_reason: Option<String>,
+}
+
 /// Persisted audit event inserted either by handlers or the audit sink.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PersistAuditLogInput {
@@ -2459,6 +2513,17 @@ pub trait OperationalStore: Send + Sync {
         limit: i64,
     ) -> Result<u64, StorageError>;
 
+    /// Inserts (or upserts) one connection log row. Mirrors Go's
+    /// `UpsertConnectionLog` query at
+    /// `coder/coderd/database/queries/connectionlogs.sql` — the
+    /// underlying unique index on `(connection_id, workspace_id,
+    /// agent_name)` means repeat inserts with the same `connection_id`
+    /// merge the disconnect fields onto the existing row.
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError>;
+
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
         &self,
@@ -3480,6 +3545,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         limit: i64,
     ) -> Result<u64, StorageError>;
 
+    /// Inserts (or upserts) one connection log row. Mirrors Go's
+    /// `UpsertConnectionLog` query at
+    /// `coder/coderd/database/queries/connectionlogs.sql` — the
+    /// underlying unique index on `(connection_id, workspace_id,
+    /// agent_name)` means repeat inserts with the same `connection_id`
+    /// merge the disconnect fields onto the existing row.
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError>;
+
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
         &self,
@@ -4030,6 +4106,20 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         log_source_id: Uuid,
         logs: &[InsertAgentLogInput],
     ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError>;
+
+    // ── workspace_agent_boundary_logs ──
+    /// Batch-inserts workspace agent boundary log rows. Mirrors the
+    /// Go `ReportBoundaryLogs` handler in
+    /// `coder/coderd/agentapi/boundary_logs.go`. An empty slice is a
+    /// no-op and must return `Ok(())` without touching the database.
+    async fn insert_workspace_agent_boundary_logs(
+        &self,
+        agent_id: Uuid,
+        logs: &[InsertBoundaryLogInput],
+    ) -> Result<(), StorageError> {
+        let _ = (agent_id, logs);
+        Ok(())
+    }
 
     /// Lists workspace agent metadata for a given agent.
     async fn list_workspace_agent_metadata(
@@ -5311,6 +5401,57 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_running_prebuilt_workspaces(
         &self,
     ) -> Result<Vec<RunningPrebuiltWorkspace>, StorageError>;
+
+    // -----------------------------------------------------------------------
+    // workspace_agent_resource_monitors
+    // Mirrors `coder/coderd/database/queries/workspaceagentresourcemonitors.sql`
+    // and the `workspace_agent_{memory,volume}_resource_monitors` tables.
+    // -----------------------------------------------------------------------
+
+    /// Returns the agent's configured memory resource monitor (if any).
+    ///
+    /// Mirrors `FetchMemoryResourceMonitorsByAgentID`.
+    async fn list_memory_resource_monitors_by_agent_id(
+        &self,
+        _agent_id: Uuid,
+    ) -> Result<Option<MemoryResourceMonitor>, StorageError> {
+        Ok(None)
+    }
+
+    /// Returns the agent's configured volume resource monitors.
+    ///
+    /// Mirrors `FetchVolumesResourceMonitorsByAgentID`.
+    async fn list_volume_resource_monitors_by_agent_id(
+        &self,
+        _agent_id: Uuid,
+    ) -> Result<Vec<VolumeResourceMonitor>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Persists a memory usage datapoint for the given agent.
+    ///
+    /// Used by `PushResourcesMonitoringUsage`.
+    async fn insert_memory_resource_monitor_usage(
+        &self,
+        _agent_id: Uuid,
+        _usage_bytes: i64,
+        _collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Persists a volume usage datapoint for the given agent and path.
+    ///
+    /// Used by `PushResourcesMonitoringUsage`.
+    async fn insert_volume_resource_monitor_usage(
+        &self,
+        _agent_id: Uuid,
+        _path: &str,
+        _usage_bytes: i64,
+        _collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 /// One row returned by `GetTemplatePresetsWithPrebuilds` — an active
@@ -5362,6 +5503,52 @@ pub struct RunningPrebuiltWorkspace {
     pub ready: bool,
     /// Workspace creation timestamp — used for oldest-first deletion.
     pub created_at: OffsetDateTime,
+}
+
+// ── workspace_agent_resource_monitors ──
+// Mirrors the two tables created in
+// `coder/coderd/database/migrations/000289_agent_resource_monitors.up.sql`
+// and extended in `000294_workspace_monitors_state.up.sql`.
+
+/// Stored row of `workspace_agent_memory_resource_monitors`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryResourceMonitor {
+    /// Agent identifier (primary key).
+    pub agent_id: Uuid,
+    /// Whether the monitor is enabled.
+    pub enabled: bool,
+    /// Usage percentage threshold at which to alert (0–100).
+    pub threshold: i32,
+    /// When the monitor was created.
+    pub created_at: OffsetDateTime,
+    /// Last time the monitor's state was updated.
+    pub updated_at: OffsetDateTime,
+    /// Monitor state. One of `OK` / `NOK` (matches the
+    /// `workspace_agent_monitor_state` enum).
+    pub state: String,
+    /// Timestamp until which alerts are debounced.
+    pub debounced_until: OffsetDateTime,
+}
+
+/// Stored row of `workspace_agent_volume_resource_monitors`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeResourceMonitor {
+    /// Agent identifier (part of composite primary key).
+    pub agent_id: Uuid,
+    /// Mount path being monitored (part of composite primary key).
+    pub path: String,
+    /// Whether the monitor is enabled.
+    pub enabled: bool,
+    /// Usage percentage threshold at which to alert (0–100).
+    pub threshold: i32,
+    /// When the monitor was created.
+    pub created_at: OffsetDateTime,
+    /// Last time the monitor's state was updated.
+    pub updated_at: OffsetDateTime,
+    /// Monitor state. One of `OK` / `NOK`.
+    pub state: String,
+    /// Timestamp until which alerts are debounced.
+    pub debounced_until: OffsetDateTime,
 }
 
 /// Stored webpush subscription record.
@@ -5729,6 +5916,49 @@ pub struct InsertWorkspaceAgentInput {
     pub display_order: i32,
     /// API key scope (`all`, `no_user_data`).
     pub api_key_scope: String,
+}
+
+// ── workspace_agent_boundary_logs ──
+
+/// Input for inserting a workspace agent boundary log row. Mirrors a
+/// single `BoundaryLog` protobuf message from
+/// `coder/agent/proto/agent.proto` — see
+/// `coder/coderd/agentapi/boundary_logs.go::ReportBoundaryLogs`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertBoundaryLogInput {
+    /// Time the log was processed by boundary. Callers should default
+    /// to "now" when the proto `time` field is absent.
+    pub event_time: OffsetDateTime,
+    /// Whether boundary allowed this resource access.
+    pub allowed: bool,
+    /// HTTP method when the reported resource is an HTTP request.
+    pub http_method: Option<String>,
+    /// HTTP URL when the reported resource is an HTTP request.
+    pub http_url: Option<String>,
+    /// Rule that matched this request. Only populated when
+    /// `allowed = true` (boundary denies by default).
+    pub matched_rule: Option<String>,
+}
+
+/// Stored workspace agent boundary log row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentBoundaryLogRow {
+    /// Stable identifier.
+    pub id: i64,
+    /// Owning agent identifier.
+    pub agent_id: Uuid,
+    /// Time the log was processed by boundary.
+    pub event_time: OffsetDateTime,
+    /// Whether boundary allowed this resource access.
+    pub allowed: bool,
+    /// HTTP method when the reported resource is an HTTP request.
+    pub http_method: Option<String>,
+    /// HTTP URL when the reported resource is an HTTP request.
+    pub http_url: Option<String>,
+    /// Rule that matched this request.
+    pub matched_rule: Option<String>,
+    /// Creation time (server-side insert timestamp).
+    pub created_at: OffsetDateTime,
 }
 
 /// Workspace-domain storage contract.
@@ -7836,6 +8066,13 @@ where
         AppStore::delete_old_connection_logs(self, older_than, limit).await
     }
 
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        AppStore::insert_connection_log(self, input).await
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
@@ -8111,6 +8348,13 @@ where
         limit: i64,
     ) -> Result<u64, StorageError> {
         (**self).delete_old_connection_logs(older_than, limit).await
+    }
+
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        (**self).insert_connection_log(input).await
     }
 
     async fn batch_insert_workspace_build_parameters(
