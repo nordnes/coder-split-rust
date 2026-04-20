@@ -2203,9 +2203,15 @@ impl AppStore for PostgresStore {
         &self,
         filter: ConnectionLogListFilter,
     ) -> Result<ConnectionLogResponse, StorageError> {
-        // The connection_logs table may not exist yet (enterprise-only migration).
-        // Return an empty response; the feature gate middleware prevents unlicensed
-        // access, and the actual SQL will be wired when the migration lands.
+        // The `connection_logs` table now exists (see
+        // `migrations/20260420120000_connection_logs.sql`) and writes
+        // are being persisted via `insert_connection_log`. The full
+        // filter/join port from Go's `GetConnectionLogsOffset` is still
+        // pending — listing is scoped to a follow-up batch. Until then
+        // this returns an empty response so the GET handler doesn't
+        // surface garbage or runtime errors on deployments where the
+        // table exists but no auxiliary joins (users / organizations)
+        // have been wired.
         let _ = filter;
         Ok(ConnectionLogResponse {
             connection_logs: Vec::new(),
@@ -2244,6 +2250,74 @@ impl AppStore for PostgresStore {
             Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("42P01") => Ok(0),
             Err(error) => Err(storage_error(error)),
         }
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        // Mirrors `UpsertConnectionLog` in
+        // `coder/coderd/database/queries/connectionlogs.sql`. The
+        // `ON CONFLICT` target matches the unique index
+        // `idx_connection_logs_connection_id_workspace_id_agent_name`
+        // so that a disconnect report lands on the original connect row
+        // instead of creating a duplicate. The `inet` column is bound
+        // as text and cast at parse time because the workspace-wide
+        // sqlx build does not enable the `ipnetwork` feature.
+        let sql = "INSERT INTO connection_logs (
+                id, connect_time, organization_id, workspace_owner_id,
+                workspace_id, workspace_name, agent_name, type, code,
+                ip, user_agent, user_id, slug_or_port, connection_id,
+                disconnect_reason, disconnect_time
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8::connection_type, $9,
+                $10::inet, $11, $12, $13, $14, $15,
+                CASE WHEN $16::connection_status = 'disconnected'
+                     THEN $2
+                     ELSE NULL
+                END
+            )
+            ON CONFLICT (connection_id, workspace_id, agent_name) DO UPDATE SET
+                disconnect_time = CASE
+                    WHEN $16::connection_status = 'disconnected'
+                         AND connection_logs.disconnect_time IS NULL
+                    THEN EXCLUDED.connect_time
+                    ELSE connection_logs.disconnect_time
+                END,
+                disconnect_reason = CASE
+                    WHEN $16::connection_status = 'disconnected'
+                         AND connection_logs.disconnect_reason IS NULL
+                    THEN EXCLUDED.disconnect_reason
+                    ELSE connection_logs.disconnect_reason
+                END,
+                code = CASE
+                    WHEN $16::connection_status = 'disconnected'
+                         AND connection_logs.code IS NULL
+                    THEN EXCLUDED.code
+                    ELSE connection_logs.code
+                END";
+        sqlx::query(sql)
+            .bind(input.id)
+            .bind(input.time)
+            .bind(input.organization_id)
+            .bind(input.workspace_owner_id)
+            .bind(input.workspace_id)
+            .bind(input.workspace_name)
+            .bind(input.agent_name)
+            .bind(input.connection_type)
+            .bind(input.code)
+            .bind(input.ip)
+            .bind(input.user_agent)
+            .bind(input.user_id)
+            .bind(input.slug_or_port)
+            .bind(input.connection_id)
+            .bind(input.disconnect_reason)
+            .bind(input.connection_status)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -6392,6 +6466,54 @@ impl AppStore for PostgresStore {
             .into_iter()
             .map(workspace_agent_log_row_from_stored)
             .collect())
+    }
+
+    // ── workspace_agent_boundary_logs ──
+    #[instrument(skip(self, logs), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_boundary_logs(
+        &self,
+        agent_id: Uuid,
+        logs: &[InsertBoundaryLogInput],
+    ) -> Result<(), StorageError> {
+        if logs.is_empty() {
+            return Ok(());
+        }
+
+        let mut event_times = Vec::with_capacity(logs.len());
+        let mut alloweds = Vec::with_capacity(logs.len());
+        let mut http_methods: Vec<Option<String>> = Vec::with_capacity(logs.len());
+        let mut http_urls: Vec<Option<String>> = Vec::with_capacity(logs.len());
+        let mut matched_rules: Vec<Option<String>> = Vec::with_capacity(logs.len());
+
+        for entry in logs {
+            event_times.push(entry.event_time);
+            alloweds.push(entry.allowed);
+            http_methods.push(entry.http_method.clone());
+            http_urls.push(entry.http_url.clone());
+            matched_rules.push(entry.matched_rule.clone());
+        }
+
+        sqlx::query(
+            "INSERT INTO workspace_agent_boundary_logs
+                 (agent_id, event_time, allowed, http_method, http_url, matched_rule)
+             SELECT $1,
+                    unnest($2::timestamptz[]),
+                    unnest($3::boolean[]),
+                    unnest($4::text[]),
+                    unnest($5::text[]),
+                    unnest($6::text[])",
+        )
+        .bind(agent_id)
+        .bind(&event_times)
+        .bind(&alloweds)
+        .bind(&http_methods)
+        .bind(&http_urls)
+        .bind(&matched_rules)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -11197,6 +11319,153 @@ impl AppStore for PostgresStore {
                 created_at: r.created_at,
             })
             .collect())
+    }
+
+    // ── workspace_agent_resource_monitors ──
+    // Mirrors queries in
+    // `coder/coderd/database/queries/workspaceagentresourcemonitors.sql`.
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_memory_resource_monitors_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<MemoryResourceMonitor>, StorageError> {
+        sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                bool,
+                i32,
+                OffsetDateTime,
+                OffsetDateTime,
+                String,
+                OffsetDateTime,
+            ),
+        >(
+            "SELECT agent_id, enabled, threshold, created_at, updated_at,
+                    state::text AS state, debounced_until
+             FROM workspace_agent_memory_resource_monitors
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| {
+            opt.map(
+                |(agent_id, enabled, threshold, created_at, updated_at, state, debounced_until)| {
+                    MemoryResourceMonitor {
+                        agent_id,
+                        enabled,
+                        threshold,
+                        created_at,
+                        updated_at,
+                        state,
+                        debounced_until,
+                    }
+                },
+            )
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_volume_resource_monitors_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<VolumeResourceMonitor>, StorageError> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                bool,
+                i32,
+                OffsetDateTime,
+                OffsetDateTime,
+                String,
+                OffsetDateTime,
+            ),
+        >(
+            "SELECT agent_id, path, enabled, threshold, created_at, updated_at,
+                    state::text AS state, debounced_until
+             FROM workspace_agent_volume_resource_monitors
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    agent_id,
+                    path,
+                    enabled,
+                    threshold,
+                    created_at,
+                    updated_at,
+                    state,
+                    debounced_until,
+                )| VolumeResourceMonitor {
+                    agent_id,
+                    path,
+                    enabled,
+                    threshold,
+                    created_at,
+                    updated_at,
+                    state,
+                    debounced_until,
+                },
+            )
+            .collect())
+    }
+
+    // The Go reference updates state/debounce on each push rather than
+    // persisting raw usage datapoints; we preserve that behaviour by
+    // recording the fact that usage was observed via `updated_at`. Raw
+    // usage rows have no home table in the Go schema, so a no-op when
+    // no monitor row exists is safe.
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_memory_resource_monitor_usage(
+        &self,
+        agent_id: Uuid,
+        _usage_bytes: i64,
+        collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspace_agent_memory_resource_monitors
+             SET updated_at = $2
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .bind(collected_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_volume_resource_monitor_usage(
+        &self,
+        agent_id: Uuid,
+        path: &str,
+        _usage_bytes: i64,
+        collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspace_agent_volume_resource_monitors
+             SET updated_at = $3
+             WHERE agent_id = $1 AND path = $2",
+        )
+        .bind(agent_id)
+        .bind(path)
+        .bind(collected_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
     }
 }
 

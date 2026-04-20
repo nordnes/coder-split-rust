@@ -976,10 +976,13 @@ impl AgentRpcHandler for LiveAgentHandler {
 
     /// Ports `coder/coderd/agentapi/connectionlog.go::ReportConnection`.
     ///
-    /// The `connection_logs` table is not yet ported to Rust. We log the
-    /// event at `info` with the decoded action/type names (Devin AI review
-    /// feedback on PR #251 — prefer enum names over raw i32) and return OK.
-    /// Nil / unparseable connection IDs are still rejected per the Go handler.
+    /// Decodes the `Connection` payload, resolves the workspace / agent
+    /// metadata required for the denormalized `connection_logs` columns,
+    /// and upserts via [`AppStore::insert_connection_log`]. Nil /
+    /// unparseable connection IDs are rejected per the Go handler. The
+    /// structured-enum logging kept from PR #260 remains — it is useful
+    /// even after persistence lands because the log is emitted at `info`
+    /// regardless of database success.
     async fn report_connection(&self, req: agent::ReportConnectionRequest) -> Result<(), RpcError> {
         let connection = req
             .connection
@@ -991,68 +994,197 @@ impl AgentRpcHandler for LiveAgentHandler {
                 "connection ID cannot be nil".into(),
             ));
         }
+
         // The enums live on the nested `Connection` message. `as_str_name()`
-        // (prost-generated) gives us stable PROTO field names to log instead
-        // of raw i32 values.
-        let action = agent::connection::Action::try_from(connection.action)
-            .ok()
-            .map(|a| a.as_str_name())
-            .unwrap_or("UNKNOWN");
-        let conn_type = agent::connection::Type::try_from(connection.r#type)
-            .ok()
-            .map(|t| t.as_str_name())
-            .unwrap_or("UNKNOWN");
+        // (prost-generated) gives us stable PROTO field names to log
+        // instead of raw i32 values.
+        let action_proto =
+            agent::connection::Action::try_from(connection.action).map_err(|_| {
+                RpcError::InvalidArgument(format!(
+                    "unknown connection action: {}",
+                    connection.action
+                ))
+            })?;
+        let status = match action_proto {
+            agent::connection::Action::Connect => "connected",
+            agent::connection::Action::Disconnect => "disconnected",
+            agent::connection::Action::Unspecified => {
+                return Err(RpcError::InvalidArgument(
+                    "connection action unspecified".into(),
+                ));
+            }
+        };
+
+        let type_proto = agent::connection::Type::try_from(connection.r#type).map_err(|_| {
+            RpcError::InvalidArgument(format!("unknown connection type: {}", connection.r#type))
+        })?;
+        let connection_type = match type_proto {
+            agent::connection::Type::Ssh => "ssh",
+            agent::connection::Type::Vscode => "vscode",
+            agent::connection::Type::Jetbrains => "jetbrains",
+            agent::connection::Type::ReconnectingPty => "reconnecting_pty",
+            agent::connection::Type::Unspecified => {
+                return Err(RpcError::InvalidArgument(
+                    "connection type unspecified".into(),
+                ));
+            }
+        };
+
+        // Resolve the agent + workspace so we can denormalize name /
+        // organization / owner into the connection_logs row. Matches the
+        // Go handler's `a.AgentFn(ctx)` + `GetWorkspaceByAgentID` path.
+        let agent_row = self
+            .store
+            .find_workspace_agent_by_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find agent: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace agent not found".into()))?;
+        let workspace = self
+            .store
+            .find_workspace_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace not found for agent".into()))?;
+
+        // Some older clients incorrectly report "localhost". Mirrors
+        // `connectionlog.go` L85-L88 (github.com/coder/coder#20194).
+        let log_ip = if connection.ip == "localhost" {
+            "127.0.0.1".to_owned()
+        } else {
+            connection.ip.clone()
+        };
+
+        let reason = connection.reason.clone().unwrap_or_default();
+        let time = connection
+            .timestamp
+            .and_then(|ts| {
+                OffsetDateTime::from_unix_timestamp(ts.seconds)
+                    .ok()
+                    .map(|t| t + time::Duration::nanoseconds(i64::from(ts.nanos)))
+            })
+            .unwrap_or_else(OffsetDateTime::now_utc);
+
+        let code = if matches!(action_proto, agent::connection::Action::Disconnect) {
+            Some(connection.status_code)
+        } else {
+            None
+        };
+
         tracing::info!(
             agent_id = %self.agent_id,
             connection_id = %connection_id,
-            action = action,
-            r#type = conn_type,
+            action = action_proto.as_str_name(),
+            r#type = type_proto.as_str_name(),
             ip = %connection.ip,
             status_code = connection.status_code,
-            "agent report_connection (persistence deferred — connection_logs table not yet ported)",
+            "agent report_connection",
         );
+
+        self.store
+            .insert_connection_log(coder_core::InsertConnectionLogInput {
+                id: Uuid::new_v4(),
+                time,
+                connection_status: status.to_owned(),
+                organization_id: workspace.organization_id,
+                workspace_owner_id: workspace.owner_id,
+                workspace_id: workspace.id,
+                workspace_name: workspace.name,
+                agent_name: agent_row.name,
+                connection_type: connection_type.to_owned(),
+                ip: log_ip,
+                code,
+                // Agent RPC reports SSH-like connections only — user_agent
+                // / user_id / slug_or_port are the preserve of the web
+                // workspace-app handlers, not this path.
+                user_agent: None,
+                user_id: None,
+                slug_or_port: None,
+                connection_id: Some(connection_id),
+                disconnect_reason: if reason.is_empty() {
+                    None
+                } else {
+                    Some(reason)
+                },
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert connection log: {e}")))?;
+
         Ok(())
     }
 
     /// Ports `coder/coderd/agentapi/resources_monitoring.go::
     /// GetResourcesMonitoringConfiguration`.
     ///
-    /// The persisted `workspace_agent_*_resource_monitors` tables are not
-    /// yet ported, so we return Go's static defaults:
-    /// - `num_datapoints = 20`, `collection_interval_seconds = 10`
-    /// - `memory = None`, `volumes = []` (monitors unconfigured).
+    /// Returns the agent's configured memory + volume monitors. Fallback
+    /// behaviour when no monitors exist matches the Go `resourcesmonitor`
+    /// package default (`NumDatapoints = 20`, `CollectionInterval = 10s`).
     async fn get_resources_monitoring_configuration(
         &self,
         _req: agent::GetResourcesMonitoringConfigurationRequest,
     ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        let memory = self
+            .store
+            .list_memory_resource_monitors_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("fetch memory monitor: {e}")))?;
+        let volumes = self
+            .store
+            .list_volume_resource_monitors_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("fetch volume monitors: {e}")))?;
+
+        use agent::get_resources_monitoring_configuration_response::{
+            Config, Memory as MemoryCfg, Volume as VolumeCfg,
+        };
         Ok(agent::GetResourcesMonitoringConfigurationResponse {
-            config: Some(
-                agent::get_resources_monitoring_configuration_response::Config {
-                    num_datapoints: 20,
-                    collection_interval_seconds: 10,
-                },
-            ),
-            memory: None,
-            volumes: Vec::new(),
+            config: Some(Config {
+                num_datapoints: 20,
+                collection_interval_seconds: 10,
+            }),
+            memory: memory.map(|m| MemoryCfg { enabled: m.enabled }),
+            volumes: volumes
+                .into_iter()
+                .map(|v| VolumeCfg {
+                    enabled: v.enabled,
+                    path: v.path,
+                })
+                .collect(),
         })
     }
 
-    /// Ports `coder/coderd/agentapi/resources_monitoring.go::
-    /// PushResourcesMonitoringUsage`.
-    ///
-    /// The `workspace_agent_*_resource_monitors` tables aren't ported, so we
-    /// just log the batch size and return OK. Matches the Go handler when
-    /// no monitors are configured (it performs a no-op through
-    /// `monitorMemory` / `monitorVolumes`).
+    /// PushResourcesMonitoringUsage`. For each datapoint in the request,
+    /// persist the memory and per-volume usage via the store. The Go
+    /// reference also drives state transition + debounce + notifications;
+    /// those are deferred to a follow-up — for now we persist usage so the
+    /// data is durable, matching the §B.1 tail follow-up to PR #260.
     async fn push_resources_monitoring_usage(
         &self,
         req: agent::PushResourcesMonitoringUsageRequest,
     ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
-        tracing::info!(
-            agent_id = %self.agent_id,
-            datapoints = req.datapoints.len(),
-            "agent push_resources_monitoring_usage (persistence deferred)",
-        );
+        for datapoint in &req.datapoints {
+            let collected_at = datapoint
+                .collected_at
+                .as_ref()
+                .and_then(proto_timestamp_to_time)
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            if let Some(mem) = datapoint.memory.as_ref() {
+                self.store
+                    .insert_memory_resource_monitor_usage(self.agent_id, mem.used, collected_at)
+                    .await
+                    .map_err(|e| RpcError::Internal(format!("insert memory usage: {e}")))?;
+            }
+            for volume in &datapoint.volumes {
+                self.store
+                    .insert_volume_resource_monitor_usage(
+                        self.agent_id,
+                        &volume.volume,
+                        volume.used,
+                        collected_at,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Internal(format!("insert volume usage: {e}")))?;
+            }
+        }
         Ok(agent::PushResourcesMonitoringUsageResponse::default())
     }
 
@@ -1213,17 +1345,63 @@ impl AgentRpcHandler for LiveAgentHandler {
 
     /// Ports `coder/coderd/agentapi/boundary_logs.go::ReportBoundaryLogs`.
     ///
-    /// The `boundary_logs` / boundary usage tracking tables are not yet
-    /// ported — log the batch size and return OK.
+    /// Converts each proto `BoundaryLog` into an [`InsertBoundaryLogInput`]
+    /// and batch-persists via
+    /// [`AppStore::insert_workspace_agent_boundary_logs`]. Boundary usage
+    /// tracking (workspace/owner allowed/denied counters) remains a
+    /// follow-up — see §B.1 tail of the parity matrix.
     async fn report_boundary_logs(
         &self,
         req: agent::ReportBoundaryLogsRequest,
     ) -> Result<agent::ReportBoundaryLogsResponse, RpcError> {
-        tracing::info!(
+        if req.logs.is_empty() {
+            return Ok(agent::ReportBoundaryLogsResponse::default());
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let mut inputs: Vec<coder_core::InsertBoundaryLogInput> =
+            Vec::with_capacity(req.logs.len());
+
+        for log in &req.logs {
+            let event_time = log
+                .time
+                .as_ref()
+                .and_then(proto_timestamp_to_time)
+                .unwrap_or(now);
+
+            let (http_method, http_url, matched_rule) = match &log.resource {
+                Some(agent::boundary_log::Resource::HttpRequest(http)) => (
+                    Some(http.method.clone()),
+                    Some(http.url.clone()),
+                    if log.allowed && !http.matched_rule.is_empty() {
+                        Some(http.matched_rule.clone())
+                    } else {
+                        None
+                    },
+                ),
+                None => (None, None, None),
+            };
+
+            inputs.push(coder_core::InsertBoundaryLogInput {
+                event_time,
+                allowed: log.allowed,
+                http_method,
+                http_url,
+                matched_rule,
+            });
+        }
+
+        self.store
+            .insert_workspace_agent_boundary_logs(self.agent_id, &inputs)
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert boundary logs: {e}")))?;
+
+        tracing::debug!(
             agent_id = %self.agent_id,
-            logs = req.logs.len(),
-            "agent report_boundary_logs (persistence deferred)",
+            logs = inputs.len(),
+            "agent report_boundary_logs persisted",
         );
+
         Ok(agent::ReportBoundaryLogsResponse::default())
     }
 
@@ -1436,6 +1614,96 @@ mod tests {
             .ok_or(url::ParseError::EmptyHost)?;
         assert!(node.force_http);
         assert_eq!(node.derp_port, 8080);
+        Ok(())
+    }
+
+    // ── workspace_agent_boundary_logs ──
+    fn test_handler()
+    -> Result<(LiveAgentHandler, Arc<crate::app::tests::FakeStore>), Box<dyn std::error::Error>>
+    {
+        let (_state, store) = crate::app::tests::test_state_with_store(true)?;
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let handler = LiveAgentHandler::new(
+            Uuid::new_v4(),
+            store_trait,
+            "2.0".to_owned(),
+            ManifestDeploymentConfig {
+                access_url: Url::parse("https://coder.example.com")?,
+                app_hostname: String::new(),
+                git_auth_config_count: 0,
+                derp_force_websockets: false,
+                derp_regions: Vec::new(),
+            },
+        );
+        Ok((handler, store))
+    }
+
+    #[tokio::test]
+    async fn report_boundary_logs_handler_persists_via_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, store) = test_handler().map_err(|e| format!("test_handler: {e}"))?;
+
+        let req = agent::ReportBoundaryLogsRequest {
+            logs: vec![
+                agent::BoundaryLog {
+                    allowed: true,
+                    time: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_000,
+                        nanos: 0,
+                    }),
+                    resource: Some(agent::boundary_log::Resource::HttpRequest(
+                        agent::boundary_log::HttpRequest {
+                            method: "GET".to_owned(),
+                            url: "https://npmjs.com/pkg".to_owned(),
+                            matched_rule: "allow-npm".to_owned(),
+                        },
+                    )),
+                },
+                agent::BoundaryLog {
+                    allowed: false,
+                    time: None,
+                    resource: Some(agent::boundary_log::Resource::HttpRequest(
+                        agent::boundary_log::HttpRequest {
+                            method: "POST".to_owned(),
+                            url: "https://denied.example.com/x".to_owned(),
+                            // Matched_rule omitted for denies.
+                            matched_rule: String::new(),
+                        },
+                    )),
+                },
+            ],
+        };
+
+        let _resp = handler.report_boundary_logs(req).await?;
+
+        let stored = store
+            .workspace_agent_boundary_logs
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?;
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].agent_id, handler.agent_id);
+        assert!(stored[0].allowed);
+        assert_eq!(stored[0].http_method.as_deref(), Some("GET"));
+        assert_eq!(stored[0].http_url.as_deref(), Some("https://npmjs.com/pkg"));
+        assert_eq!(stored[0].matched_rule.as_deref(), Some("allow-npm"));
+        assert!(!stored[1].allowed);
+        // Denied entries drop empty matched_rule.
+        assert_eq!(stored[1].matched_rule, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn report_boundary_logs_handler_empty_batch_is_ok()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, store) = test_handler().map_err(|e| format!("test_handler: {e}"))?;
+        let _resp = handler
+            .report_boundary_logs(agent::ReportBoundaryLogsRequest { logs: vec![] })
+            .await?;
+        let stored = store
+            .workspace_agent_boundary_logs
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?;
+        assert!(stored.is_empty());
         Ok(())
     }
 }

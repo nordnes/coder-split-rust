@@ -569,6 +569,15 @@ impl AppStore for BenchStore {
         Ok(0)
     }
 
+    async fn insert_connection_log(
+        &self,
+        _input: coder_core::InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        // BenchStore has no persistence layer. Return Ok so benchmark
+        // harnesses that exercise the ReportConnection path don't fail.
+        Ok(())
+    }
+
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
@@ -1420,6 +1429,15 @@ impl AppStore for BenchStore {
         _logs: &[InsertAgentLogInput],
     ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
         Err(StorageError::unavailable("bench stub"))
+    }
+
+    // ── workspace_agent_boundary_logs ──
+    async fn insert_workspace_agent_boundary_logs(
+        &self,
+        _agent_id: Uuid,
+        _logs: &[coder_core::InsertBoundaryLogInput],
+    ) -> Result<(), StorageError> {
+        Ok(())
     }
 
     async fn insert_workspace_agent_script_timing(

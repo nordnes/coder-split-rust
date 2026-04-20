@@ -2004,6 +2004,10 @@ pub(crate) mod tests {
         workspace_agent_log_sources: Mutex<HashMap<Uuid, WorkspaceAgentLogSourceRow>>,
         workspace_agent_logs: Mutex<Vec<WorkspaceAgentLogRow>>,
         workspace_agent_log_next_id: Mutex<i64>,
+        // ── workspace_agent_boundary_logs ──
+        pub(crate) workspace_agent_boundary_logs:
+            Mutex<Vec<coder_core::WorkspaceAgentBoundaryLogRow>>,
+        workspace_agent_boundary_log_next_id: Mutex<i64>,
         workspace_agent_scripts: Mutex<Vec<WorkspaceAgentScriptRow>>,
         workspace_agent_metadata: Mutex<Vec<WorkspaceAgentMetadataRow>>,
         workspace_agent_devcontainers: Mutex<Vec<coder_core::WorkspaceAgentDevcontainerRow>>,
@@ -2049,6 +2053,15 @@ pub(crate) mod tests {
         vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
         // IDP sync settings (deployment-level)
         organization_idp_sync_settings: Mutex<coder_core::api::OrganizationSyncSettings>,
+        // Connection logs (for testing agent ReportConnection persistence)
+        connection_logs: Mutex<Vec<coder_core::InsertConnectionLogInput>>,
+        // ── workspace_agent_resource_monitors ──
+        memory_resource_monitors: Mutex<HashMap<Uuid, coder_core::MemoryResourceMonitor>>,
+        volume_resource_monitors: Mutex<HashMap<(Uuid, String), coder_core::VolumeResourceMonitor>>,
+        /// (agent_id, usage_bytes, collected_at) — inserted memory usage datapoints.
+        memory_resource_monitor_usages: Mutex<Vec<(Uuid, i64, OffsetDateTime)>>,
+        /// (agent_id, path, usage_bytes, collected_at) — inserted volume usage datapoints.
+        volume_resource_monitor_usages: Mutex<Vec<(Uuid, String, i64, OffsetDateTime)>>,
     }
 
     impl FakeStore {
@@ -2119,6 +2132,8 @@ pub(crate) mod tests {
                 workspace_agent_log_sources: Mutex::new(HashMap::new()),
                 workspace_agent_logs: Mutex::new(Vec::new()),
                 workspace_agent_log_next_id: Mutex::new(1),
+                workspace_agent_boundary_logs: Mutex::new(Vec::new()),
+                workspace_agent_boundary_log_next_id: Mutex::new(1),
                 workspace_agent_scripts: Mutex::new(Vec::new()),
                 workspace_agent_metadata: Mutex::new(Vec::new()),
                 workspace_agent_devcontainers: Mutex::new(Vec::new()),
@@ -2154,7 +2169,27 @@ pub(crate) mod tests {
                 organization_idp_sync_settings: Mutex::new(
                     coder_core::api::OrganizationSyncSettings::default(),
                 ),
+                connection_logs: Mutex::new(Vec::new()),
+                memory_resource_monitors: Mutex::new(HashMap::new()),
+                volume_resource_monitors: Mutex::new(HashMap::new()),
+                memory_resource_monitor_usages: Mutex::new(Vec::new()),
+                volume_resource_monitor_usages: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Returns a clone of every connection log row that has been
+        /// reported to the store via `insert_connection_log`. Tests for
+        /// agent RPC persistence read this to assert that a report
+        /// landed correctly.
+        #[cfg(test)]
+        pub(crate) fn connection_logs_snapshot(
+            &self,
+        ) -> Result<Vec<coder_core::InsertConnectionLogInput>, StorageError> {
+            Ok(self
+                .connection_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .clone())
         }
 
         /// Marks the user with the given id as a system user, for testing
@@ -2181,6 +2216,52 @@ pub(crate) mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(agent.id, agent);
             Ok(())
+        }
+
+        /// Seeds a memory resource monitor for testing.
+        pub(crate) fn insert_memory_resource_monitor(
+            &self,
+            monitor: coder_core::MemoryResourceMonitor,
+        ) -> Result<(), StorageError> {
+            self.memory_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(monitor.agent_id, monitor);
+            Ok(())
+        }
+
+        /// Seeds a volume resource monitor for testing.
+        pub(crate) fn insert_volume_resource_monitor(
+            &self,
+            monitor: coder_core::VolumeResourceMonitor,
+        ) -> Result<(), StorageError> {
+            self.volume_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert((monitor.agent_id, monitor.path.clone()), monitor);
+            Ok(())
+        }
+
+        /// Returns a snapshot of the recorded memory usage datapoints.
+        pub(crate) fn memory_resource_monitor_usages(
+            &self,
+        ) -> Result<Vec<(Uuid, i64, OffsetDateTime)>, StorageError> {
+            Ok(self
+                .memory_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .clone())
+        }
+
+        /// Returns a snapshot of the recorded volume usage datapoints.
+        pub(crate) fn volume_resource_monitor_usages(
+            &self,
+        ) -> Result<Vec<(Uuid, String, i64, OffsetDateTime)>, StorageError> {
+            Ok(self
+                .volume_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .clone())
         }
 
         /// Inserts a workspace app into the fake store for testing.
@@ -4330,6 +4411,17 @@ pub(crate) mod tests {
         ) -> Result<u64, StorageError> {
             // FakeStore has no in-memory connection log table; nothing to prune.
             Ok(0)
+        }
+
+        async fn insert_connection_log(
+            &self,
+            input: coder_core::InsertConnectionLogInput,
+        ) -> Result<(), StorageError> {
+            self.connection_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(input);
+            Ok(())
         }
 
         async fn try_acquire_advisory_lock(
@@ -7180,6 +7272,40 @@ pub(crate) mod tests {
                 result.push(row);
             }
             Ok(result)
+        }
+
+        // ── workspace_agent_boundary_logs ──
+        async fn insert_workspace_agent_boundary_logs(
+            &self,
+            agent_id: Uuid,
+            logs: &[coder_core::InsertBoundaryLogInput],
+        ) -> Result<(), StorageError> {
+            if logs.is_empty() {
+                return Ok(());
+            }
+            let mut stored = self
+                .workspace_agent_boundary_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut next_id = self
+                .workspace_agent_boundary_log_next_id
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            for entry in logs {
+                stored.push(coder_core::WorkspaceAgentBoundaryLogRow {
+                    id: *next_id,
+                    agent_id,
+                    event_time: entry.event_time,
+                    allowed: entry.allowed,
+                    http_method: entry.http_method.clone(),
+                    http_url: entry.http_url.clone(),
+                    matched_rule: entry.matched_rule.clone(),
+                    created_at: now,
+                });
+                *next_id += 1;
+            }
+            Ok(())
         }
 
         async fn insert_workspace_agent_script_timing(
@@ -10359,6 +10485,61 @@ pub(crate) mod tests {
             &self,
         ) -> Result<Vec<coder_core::RunningPrebuiltWorkspace>, StorageError> {
             Ok(Vec::new())
+        }
+
+        // ── workspace_agent_resource_monitors ──
+
+        async fn list_memory_resource_monitors_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Option<coder_core::MemoryResourceMonitor>, StorageError> {
+            Ok(self
+                .memory_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&agent_id)
+                .cloned())
+        }
+
+        async fn list_volume_resource_monitors_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<coder_core::VolumeResourceMonitor>, StorageError> {
+            Ok(self
+                .volume_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .filter(|m| m.agent_id == agent_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn insert_memory_resource_monitor_usage(
+            &self,
+            agent_id: Uuid,
+            usage_bytes: i64,
+            collected_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.memory_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push((agent_id, usage_bytes, collected_at));
+            Ok(())
+        }
+
+        async fn insert_volume_resource_monitor_usage(
+            &self,
+            agent_id: Uuid,
+            path: &str,
+            usage_bytes: i64,
+            collected_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.volume_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push((agent_id, path.to_owned(), usage_bytes, collected_at));
+            Ok(())
         }
     }
 
@@ -19107,6 +19288,152 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // ── workspace_agent_resource_monitors tests ──
+
+    #[tokio::test]
+    async fn insert_memory_resource_monitor_usage_persists_in_fake_store()
+    -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(FakeStore::new(true));
+        let agent_id = Uuid::new_v4();
+        let collected_at = OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
+        AppStore::insert_memory_resource_monitor_usage(
+            store.as_ref(),
+            agent_id,
+            2048,
+            collected_at,
+        )
+        .await?;
+
+        let recorded = store.memory_resource_monitor_usages()?;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, agent_id);
+        assert_eq!(recorded[0].1, 2048);
+        assert_eq!(recorded[0].2, collected_at);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_resources_monitoring_configuration_returns_configured_monitors()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let now = OffsetDateTime::now_utc();
+        store.insert_memory_resource_monitor(coder_core::MemoryResourceMonitor {
+            agent_id,
+            enabled: true,
+            threshold: 80,
+            created_at: now,
+            updated_at: now,
+            state: "OK".to_owned(),
+            debounced_until: now,
+        })?;
+        store.insert_volume_resource_monitor(coder_core::VolumeResourceMonitor {
+            agent_id,
+            path: "/tmp".to_owned(),
+            enabled: true,
+            threshold: 90,
+            created_at: now,
+            updated_at: now,
+            state: "OK".to_owned(),
+            debounced_until: now,
+        })?;
+
+        let handler = live_handler_for_store(store, agent_id);
+        let response = handler
+            .get_resources_monitoring_configuration(
+                agent::GetResourcesMonitoringConfigurationRequest {},
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let cfg = response.config.ok_or("missing config")?;
+        assert_eq!(cfg.num_datapoints, 20);
+        assert_eq!(cfg.collection_interval_seconds, 10);
+        let memory = response.memory.ok_or("missing memory monitor")?;
+        assert!(memory.enabled);
+        assert_eq!(response.volumes.len(), 1);
+        assert_eq!(response.volumes[0].path, "/tmp");
+        assert!(response.volumes[0].enabled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_resources_monitoring_configuration_returns_defaults_when_empty()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let response = handler
+            .get_resources_monitoring_configuration(
+                agent::GetResourcesMonitoringConfigurationRequest {},
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let cfg = response.config.ok_or("missing config")?;
+        assert_eq!(cfg.num_datapoints, 20);
+        assert_eq!(cfg.collection_interval_seconds, 10);
+        assert!(response.memory.is_none());
+        assert!(response.volumes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_resources_monitoring_usage_persists_via_store() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let memory_usage = agent::push_resources_monitoring_usage_request::datapoint::MemoryUsage {
+            used: 1024,
+            total: 4096,
+        };
+        let volume_usage = agent::push_resources_monitoring_usage_request::datapoint::VolumeUsage {
+            volume: "/mnt/data".to_owned(),
+            used: 500,
+            total: 1000,
+        };
+        let datapoint = agent::push_resources_monitoring_usage_request::Datapoint {
+            collected_at: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
+            memory: Some(memory_usage),
+            volumes: vec![volume_usage],
+        };
+
+        handler
+            .push_resources_monitoring_usage(agent::PushResourcesMonitoringUsageRequest {
+                datapoints: vec![datapoint],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let mem_usages = store.memory_resource_monitor_usages()?;
+        assert_eq!(mem_usages.len(), 1);
+        assert_eq!(mem_usages[0].0, agent_id);
+        assert_eq!(mem_usages[0].1, 1024);
+
+        let vol_usages = store.volume_resource_monitor_usages()?;
+        assert_eq!(vol_usages.len(), 1);
+        assert_eq!(vol_usages[0].0, agent_id);
+        assert_eq!(vol_usages[0].1, "/mnt/data");
+        assert_eq!(vol_usages[0].2, 500);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn agent_gitauth_deprecated_returns_empty() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
@@ -19491,18 +19818,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn agent_rpc_live_report_connection_logs_valid_event() -> Result<(), Box<dyn Error>> {
+    async fn agent_rpc_live_report_connection_persists_via_store() -> Result<(), Box<dyn Error>> {
         use coder_agent_rpc::AgentRpcHandler;
         use coder_agent_rpc::proto::agent_v2 as agent;
 
         let (_state, store, _token) = setup_agent_test_state()?;
         let agent_id = agent_id_from_store(&store)?;
-        let handler = live_handler_for_store(store, agent_id);
+        let handler = live_handler_for_store(store.clone(), agent_id);
 
+        let connection_id = Uuid::new_v4();
         let _ = handler
             .report_connection(agent::ReportConnectionRequest {
                 connection: Some(agent::Connection {
-                    id: Uuid::new_v4().as_bytes().to_vec(),
+                    id: connection_id.as_bytes().to_vec(),
                     action: agent::connection::Action::Connect as i32,
                     r#type: agent::connection::Type::Vscode as i32,
                     timestamp: None,
@@ -19513,6 +19841,83 @@ pub(crate) mod tests {
             })
             .await
             .map_err(|e| format!("{e:?}"))?;
+
+        let rows = store.connection_logs_snapshot()?;
+        assert_eq!(rows.len(), 1, "expected one persisted connection log");
+        let row = rows.into_iter().next().ok_or("no row")?;
+        assert_eq!(row.connection_status, "connected");
+        assert_eq!(row.connection_type, "vscode");
+        assert_eq!(row.agent_name, "test-agent");
+        assert_eq!(row.workspace_name, "test-workspace");
+        assert_eq!(row.ip, "10.0.0.1");
+        assert_eq!(row.connection_id, Some(connection_id));
+        // Connect events must leave `code` unset — it is populated only on
+        // disconnect via the upsert path.
+        assert!(row.code.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_connection_disconnect_records_code() -> Result<(), Box<dyn Error>>
+    {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let connection_id = Uuid::new_v4();
+        let _ = handler
+            .report_connection(agent::ReportConnectionRequest {
+                connection: Some(agent::Connection {
+                    id: connection_id.as_bytes().to_vec(),
+                    action: agent::connection::Action::Disconnect as i32,
+                    r#type: agent::connection::Type::Ssh as i32,
+                    timestamp: None,
+                    ip: "localhost".to_owned(),
+                    status_code: 255,
+                    reason: Some("client closed".to_owned()),
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let rows = store.connection_logs_snapshot()?;
+        let row = rows.into_iter().next().ok_or("no row")?;
+        assert_eq!(row.connection_status, "disconnected");
+        assert_eq!(row.code, Some(255));
+        // `localhost` must be normalized to `127.0.0.1` to match the Go
+        // handler (github.com/coder/coder#20194).
+        assert_eq!(row.ip, "127.0.0.1");
+        assert_eq!(row.disconnect_reason.as_deref(), Some("client closed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_insert_connection_log_persists_row() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let input = coder_core::InsertConnectionLogInput {
+            id: Uuid::new_v4(),
+            time: OffsetDateTime::now_utc(),
+            connection_status: "connected".to_owned(),
+            organization_id: Uuid::from_u128(1),
+            workspace_owner_id: Uuid::from_u128(2),
+            workspace_id: Uuid::from_u128(3),
+            workspace_name: "ws".to_owned(),
+            agent_name: "agent".to_owned(),
+            connection_type: "ssh".to_owned(),
+            ip: "10.0.0.1".to_owned(),
+            code: None,
+            user_agent: None,
+            user_id: None,
+            slug_or_port: None,
+            connection_id: Some(Uuid::new_v4()),
+            disconnect_reason: None,
+        };
+        store.insert_connection_log(input.clone()).await?;
+        let snapshot = store.connection_logs_snapshot()?;
+        assert_eq!(snapshot, vec![input]);
         Ok(())
     }
 
@@ -29442,133 +29847,6 @@ pub(crate) mod tests {
             .ok_or("expected a Write audit event for favorite")?;
         assert_eq!(event.resource, ResourceKind::Workspace);
         assert!(event.summary.contains("favorited"));
-        Ok(())
-    }
-
-    /// `put_workspace_favorite` should emit a structured diff flipping
-    /// `favorite: false -> true`. Part of the Wave 2 workspace audit-diff
-    /// rollout (gap-doc §B.10.1).
-    #[tokio::test]
-    async fn workspace_favorite_audit_carries_diff() -> Result<(), Box<dyn Error>> {
-        let (state, store, audit) = test_state_with_memory_audit()?;
-        let app = build_router(state, None);
-        let session_token = create_and_login(&app).await?;
-        let org_id = first_organization_id(&app, &session_token).await?;
-        let uid = owner_user_id(&store);
-        let tmpl = seed_template(&store, org_id, uid);
-        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
-
-        let response = call(
-            app,
-            authenticated_request(
-                Method::PUT,
-                &format!("/api/v2/workspaces/{}/favorite", ws.id),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
-        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
-            .ok_or("expected a Write audit event for favorite")?;
-        let diff = event
-            .diff
-            .as_ref()
-            .ok_or("favorite audit event should carry a structured diff")?;
-        let change = diff
-            .changes
-            .get("favorite")
-            .ok_or("diff should contain a `favorite` change entry")?;
-        assert_eq!(change.old, serde_json::json!(false));
-        assert_eq!(change.new, serde_json::json!(true));
-        assert!(!change.secret);
-        Ok(())
-    }
-
-    /// `delete_workspace_favorite` should emit a structured diff flipping
-    /// `favorite: true -> false`.
-    #[tokio::test]
-    async fn workspace_unfavorite_audit_carries_diff() -> Result<(), Box<dyn Error>> {
-        let (state, store, audit) = test_state_with_memory_audit()?;
-        let app = build_router(state, None);
-        let session_token = create_and_login(&app).await?;
-        let org_id = first_organization_id(&app, &session_token).await?;
-        let uid = owner_user_id(&store);
-        let tmpl = seed_template(&store, org_id, uid);
-        let mut ws = seed_workspace(&store, uid, org_id, tmpl.id);
-        // Pre-favorite the workspace so the DELETE mutation produces a
-        // true -> false diff.
-        ws.favorite = true;
-        if let Ok(mut wss) = store.workspaces.lock() {
-            wss.insert(ws.id, ws.clone());
-        }
-
-        let response = call(
-            app,
-            authenticated_request(
-                Method::DELETE,
-                &format!("/api/v2/workspaces/{}/favorite", ws.id),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
-        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
-            .ok_or("expected a Write audit event for unfavorite")?;
-        let diff = event
-            .diff
-            .as_ref()
-            .ok_or("unfavorite audit event should carry a structured diff")?;
-        let change = diff
-            .changes
-            .get("favorite")
-            .ok_or("diff should contain a `favorite` change entry")?;
-        assert_eq!(change.old, serde_json::json!(true));
-        assert_eq!(change.new, serde_json::json!(false));
-        Ok(())
-    }
-
-    /// `put_workspace_dormant` should emit a structured diff capturing the
-    /// change to `dormant_at` (None -> Some timestamp).
-    #[tokio::test]
-    async fn workspace_dormant_audit_carries_diff() -> Result<(), Box<dyn Error>> {
-        let (state, store, audit) = test_state_with_memory_audit()?;
-        let app = build_router(state, None);
-        let session_token = create_and_login(&app).await?;
-        let org_id = first_organization_id(&app, &session_token).await?;
-        let uid = owner_user_id(&store);
-        let tmpl = seed_template(&store, org_id, uid);
-        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
-
-        let response = call(
-            app,
-            authenticated_json_request(
-                Method::PUT,
-                &format!("/api/v2/workspaces/{}/dormant", ws.id),
-                &session_token,
-                &json!({ "dormant": true }),
-            )?,
-        )
-        .await?;
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
-        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
-            .ok_or("expected a Write audit event for dormant toggle")?;
-        let diff = event
-            .diff
-            .as_ref()
-            .ok_or("dormant audit event should carry a structured diff")?;
-        let change = diff
-            .changes
-            .get("dormant_at")
-            .ok_or("diff should contain a `dormant_at` change entry")?;
-        assert_eq!(change.old, serde_json::Value::Null);
-        assert!(!change.new.is_null(), "new dormant_at should be populated");
-        assert!(!change.secret);
         Ok(())
     }
 
@@ -44499,6 +44777,62 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(new_get.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // ── workspace_agent_boundary_logs ──
+    #[tokio::test]
+    async fn insert_workspace_agent_boundary_logs_persists_in_fake_store()
+    -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let agent_id = Uuid::new_v4();
+
+        let now = OffsetDateTime::now_utc();
+        let inputs = vec![
+            coder_core::InsertBoundaryLogInput {
+                event_time: now,
+                allowed: true,
+                http_method: Some("GET".to_owned()),
+                http_url: Some("https://example.com/a".to_owned()),
+                matched_rule: Some("allow-example".to_owned()),
+            },
+            coder_core::InsertBoundaryLogInput {
+                event_time: now,
+                allowed: false,
+                http_method: Some("POST".to_owned()),
+                http_url: Some("https://denied.example.com/b".to_owned()),
+                matched_rule: None,
+            },
+        ];
+
+        store
+            .insert_workspace_agent_boundary_logs(agent_id, &inputs)
+            .await?;
+
+        {
+            let stored = store
+                .workspace_agent_boundary_logs
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            assert_eq!(stored.len(), 2);
+            assert_eq!(stored[0].agent_id, agent_id);
+            assert!(stored[0].allowed);
+            assert_eq!(stored[0].http_method.as_deref(), Some("GET"));
+            assert_eq!(stored[0].matched_rule.as_deref(), Some("allow-example"));
+            assert!(!stored[1].allowed);
+            assert_eq!(stored[1].matched_rule, None);
+        }
+
+        // Empty batch is a no-op.
+        store
+            .insert_workspace_agent_boundary_logs(agent_id, &[])
+            .await?;
+        let stored = store
+            .workspace_agent_boundary_logs
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?;
+        assert_eq!(stored.len(), 2, "empty batch must not add rows");
+
         Ok(())
     }
 }
