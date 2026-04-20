@@ -2078,6 +2078,10 @@ impl AppStore for PostgresStore {
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
         let query_start = std::time::Instant::now();
+        // `diff_json` is the legacy TEXT column still populated for
+        // backward compatibility; `diff` is the native JSONB column
+        // introduced by migration `20260420140000_audit_log_diff.sql`
+        // for parity with Go's `audit_logs.diff jsonb`.
         let result = sqlx::query(
             "INSERT INTO audit_logs (
                 id,
@@ -2091,6 +2095,7 @@ impl AppStore for PostgresStore {
                 resource_icon,
                 action,
                 diff_json,
+                diff,
                 status_code,
                 additional_fields_json,
                 description,
@@ -2100,7 +2105,7 @@ impl AppStore for PostgresStore {
                 user_id
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
             )",
         )
         .bind(input.id)
@@ -2114,6 +2119,7 @@ impl AppStore for PostgresStore {
         .bind(input.resource_icon)
         .bind(input.action)
         .bind(input.diff.to_string())
+        .bind(&input.diff)
         .bind(input.status_code)
         .bind(input.additional_fields.to_string())
         .bind(input.description)
@@ -2140,11 +2146,15 @@ impl AppStore for PostgresStore {
             return Ok(());
         }
 
-        // Build a multi-row INSERT statement dynamically.
+        // Build a multi-row INSERT statement dynamically.  `diff_json`
+        // is the legacy TEXT column still populated for backward
+        // compatibility; `diff` is the native JSONB column added by
+        // migration `20260420140000_audit_log_diff.sql` for parity with
+        // Go's `audit_logs.diff jsonb`.
         let mut query = String::from(
             "INSERT INTO audit_logs (
                 id, request_id, time, ip, user_agent, resource_type, resource_id,
-                resource_target, resource_icon, action, diff_json, status_code,
+                resource_target, resource_icon, action, diff_json, diff, status_code,
                 additional_fields_json, description, resource_link, is_deleted,
                 organization_id, user_id
             ) VALUES ",
@@ -2156,7 +2166,7 @@ impl AppStore for PostgresStore {
                 query.push_str(", ");
             }
             query.push('(');
-            for j in 0..18u32 {
+            for j in 0..19u32 {
                 if j > 0 {
                     query.push_str(", ");
                 }
@@ -2164,7 +2174,7 @@ impl AppStore for PostgresStore {
                 query.push_str(&(param_idx + j).to_string());
             }
             query.push(')');
-            param_idx += 18;
+            param_idx += 19;
         }
 
         let mut sqlx_query = sqlx::query(&query);
@@ -2181,6 +2191,7 @@ impl AppStore for PostgresStore {
                 .bind(&input.resource_icon)
                 .bind(&input.action)
                 .bind(input.diff.to_string())
+                .bind(&input.diff)
                 .bind(input.status_code)
                 .bind(input.additional_fields.to_string())
                 .bind(&input.description)

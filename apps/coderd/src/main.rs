@@ -899,7 +899,15 @@ impl PersistingAuditSink {
             resource_target: event.target_id.clone().unwrap_or_default(),
             resource_icon: String::new(),
             action: event.action.as_str().to_owned(),
-            diff: serde_json::json!({}),
+            // Plumb the structured diff (when the call site populates
+            // one via `Auditable::audit_diff`) into the native JSONB
+            // `audit_logs.diff` column.  Fall back to an empty object
+            // so the NOT NULL constraint stays satisfied.
+            diff: event
+                .diff
+                .as_ref()
+                .map(coder_audit::AuditDiff::to_json)
+                .unwrap_or_else(|| serde_json::json!({})),
             status_code: 0,
             additional_fields: serde_json::json!({}),
             description: event.summary.clone(),
@@ -2091,5 +2099,92 @@ mod tests {
             .expect("resolution succeeds");
         assert_eq!(url.host_str(), Some("8.8.8.8"));
         assert_eq!(url.port(), Some(4443));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // AuditEvent → PersistAuditLogInput translation (§B.10.1)
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn persisting_audit_sink_plumbs_event_diff_into_input() {
+        use coder_audit::{AuditAction, AuditDiff, AuditFieldDiff};
+        use coder_rbac::ResourceKind;
+        use std::collections::BTreeMap;
+
+        // Build a structured diff with one tracked change and one
+        // secret change, matching what `Auditable::audit_diff`
+        // produces for real handlers.
+        let mut changes: BTreeMap<String, AuditFieldDiff> = BTreeMap::new();
+        changes.insert(
+            "email".to_owned(),
+            AuditFieldDiff {
+                old: serde_json::json!("a@b"),
+                new: serde_json::json!("c@d"),
+                secret: false,
+            },
+        );
+        changes.insert(
+            "hashed_password".to_owned(),
+            AuditFieldDiff {
+                old: serde_json::json!("old"),
+                new: serde_json::json!("new"),
+                secret: true,
+            },
+        );
+        let diff = AuditDiff { changes };
+
+        let event = AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::User,
+            actor_user_id: Some(Uuid::new_v4()),
+            target_id: Some(Uuid::nil().to_string()),
+            summary: "updated user".to_owned(),
+            diff: Some(diff.clone()),
+        };
+
+        let input = PersistingAuditSink::event_to_input(&event);
+
+        // The structured diff must land verbatim in the input, keyed
+        // by field name, so the native JSONB `audit_logs.diff`
+        // column receives the same payload Go writes via
+        // `coderd/audit/diff.go`.
+        let email = input
+            .diff
+            .get("email")
+            .expect("email field present in persisted diff");
+        assert_eq!(email.get("old"), Some(&serde_json::json!("a@b")));
+        assert_eq!(email.get("new"), Some(&serde_json::json!("c@d")));
+        assert_eq!(email.get("secret"), Some(&serde_json::json!(false)));
+
+        let pwd = input
+            .diff
+            .get("hashed_password")
+            .expect("hashed_password present in persisted diff");
+        assert_eq!(pwd.get("secret"), Some(&serde_json::json!(true)));
+
+        // Round-trip through `AuditDiff::to_json` must equal the
+        // `PersistAuditLogInput.diff` field.
+        assert_eq!(input.diff, diff.to_json());
+    }
+
+    #[test]
+    fn persisting_audit_sink_uses_empty_object_when_event_has_no_diff() {
+        use coder_audit::AuditAction;
+        use coder_rbac::ResourceKind;
+
+        let event = AuditEvent {
+            action: AuditAction::Login,
+            resource: ResourceKind::Authentication,
+            actor_user_id: Some(Uuid::nil()),
+            target_id: None,
+            summary: "logged in".to_owned(),
+            diff: None,
+        };
+
+        let input = PersistingAuditSink::event_to_input(&event);
+
+        // A missing diff must fall back to an empty JSON object so the
+        // NOT NULL JSONB column constraint stays satisfied.
+        assert_eq!(input.diff, serde_json::json!({}));
     }
 }

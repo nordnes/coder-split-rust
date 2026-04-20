@@ -607,7 +607,13 @@ pub struct PersistAuditLogInput {
     pub resource_icon: String,
     /// Audited action.
     pub action: String,
-    /// Structured diff payload.
+    /// Structured diff payload, persisted verbatim into the native JSONB
+    /// `audit_logs.diff` column (see migration
+    /// `20260420140000_audit_log_diff.sql`).  Callers should pass the
+    /// output of `coder_audit::AuditDiff::to_json` or
+    /// `serde_json::Value::Object(Default::default())` when no diff is
+    /// available.  Mirrors Go's `audit_logs.diff jsonb` column populated
+    /// by `coderd/audit/diff.go`.
     pub diff: Value,
     /// HTTP status code associated with the action.
     pub status_code: i32,
