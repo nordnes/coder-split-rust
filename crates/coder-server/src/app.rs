@@ -30769,6 +30769,274 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // -------------------------------------------------------------------
+    // Audit-sweep tail — identity-area sites (gap-doc §B.10.2 / Wave 0 S7).
+    //
+    // Each test drives a handler end-to-end through the router and asserts
+    // that exactly the expected audit action/resource lands in the captured
+    // MemoryAuditSink. Surrounding events (e.g. the initial password login)
+    // are filtered out via `audit_event_for` on action + target_id.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn api_key_create_session_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/keys", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Login emits an Authentication event; the Create on ApiKey is the
+        // one we're asserting on here.
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = events
+            .iter()
+            .find(|e| e.action == AuditAction::Create && e.resource == ResourceKind::ApiKey)
+            .ok_or("expected a Create audit event for session API key")?;
+        assert!(
+            event.summary.contains("session API key"),
+            "summary should reference session API key, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_key_create_token_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "audit-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = events
+            .iter()
+            .find(|e| {
+                e.action == AuditAction::Create
+                    && e.resource == ResourceKind::ApiKey
+                    && e.summary.contains("token API key")
+            })
+            .ok_or("expected a Create audit event for token API key")?;
+        assert!(
+            event.target_id.is_some(),
+            "token API key audit must carry a target_id"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_key_delete_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a named token so we can retrieve its id and delete it.
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "audit-del".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let list_body = response_json(list_response).await?;
+        let key_id = list_body
+            .as_array()
+            .and_then(|keys| keys.first())
+            .and_then(|key| key.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing key id")?
+            .to_owned();
+
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/users/me/keys/{key_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 3, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &key_id)
+            .ok_or("expected a Delete audit event for API key delete")?;
+        assert_eq!(event.resource, ResourceKind::ApiKey);
+        assert!(
+            event.summary.contains("deleted API key"),
+            "summary should reference API key delete, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gitsshkey_put_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let uid = owner_user_id(&store);
+
+        let response = call(
+            app,
+            authenticated_request(Method::PUT, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &uid.to_string())
+            .ok_or("expected a Write audit event for gitsshkey regenerate")?;
+        assert_eq!(event.resource, ResourceKind::GitSshKey);
+        assert!(
+            event.summary.contains("git ssh key"),
+            "summary should reference git ssh key, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_member_delete_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "memberdel@example.com".to_owned(),
+                    username: "memberdel".to_owned(),
+                    name: "Member Del".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?
+            .to_owned();
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/organizations/{organization_id}/members/memberdel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let target = format!("{organization_id}:{user_id}");
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &target)
+            .ok_or("expected a Delete audit event for org member delete")?;
+        assert_eq!(event.resource, ResourceKind::OrganizationMember);
+        assert!(
+            event.summary.contains("removed organization member"),
+            "summary should reference member remove, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_template_method_put_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+
+        // Seed a notification template so the PUT can resolve it.
+        let template_id = Uuid::from_u128(6001);
+        {
+            let mut templates = store
+                .notification_templates
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            templates.push(coder_core::NotificationTemplate {
+                id: template_id,
+                name: "audit-template".to_owned(),
+                title_template: "Title".to_owned(),
+                body_template: "Body".to_owned(),
+                actions: None,
+                group: None,
+                method: None,
+                kind: "system".to_owned(),
+                enabled_by_default: true,
+            });
+        }
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/notifications/templates/{template_id}/method"),
+                &session_token,
+                &json!({ "method": "webhook" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &template_id.to_string())
+            .ok_or("expected a Write audit event for notification template method")?;
+        assert_eq!(event.resource, ResourceKind::NotificationTemplate);
+        assert!(
+            event.summary.contains("notification template method"),
+            "summary should reference template method update, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_proxy_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
         use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
