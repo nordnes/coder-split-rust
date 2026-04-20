@@ -2049,6 +2049,8 @@ pub(crate) mod tests {
         vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
         // IDP sync settings (deployment-level)
         organization_idp_sync_settings: Mutex<coder_core::api::OrganizationSyncSettings>,
+        // Connection logs (for testing agent ReportConnection persistence)
+        connection_logs: Mutex<Vec<coder_core::InsertConnectionLogInput>>,
     }
 
     impl FakeStore {
@@ -2154,7 +2156,23 @@ pub(crate) mod tests {
                 organization_idp_sync_settings: Mutex::new(
                     coder_core::api::OrganizationSyncSettings::default(),
                 ),
+                connection_logs: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Returns a clone of every connection log row that has been
+        /// reported to the store via `insert_connection_log`. Tests for
+        /// agent RPC persistence read this to assert that a report
+        /// landed correctly.
+        #[cfg(test)]
+        pub(crate) fn connection_logs_snapshot(
+            &self,
+        ) -> Result<Vec<coder_core::InsertConnectionLogInput>, StorageError> {
+            Ok(self
+                .connection_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .clone())
         }
 
         /// Marks the user with the given id as a system user, for testing
@@ -4330,6 +4348,17 @@ pub(crate) mod tests {
         ) -> Result<u64, StorageError> {
             // FakeStore has no in-memory connection log table; nothing to prune.
             Ok(0)
+        }
+
+        async fn insert_connection_log(
+            &self,
+            input: coder_core::InsertConnectionLogInput,
+        ) -> Result<(), StorageError> {
+            self.connection_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(input);
+            Ok(())
         }
 
         async fn try_acquire_advisory_lock(
@@ -19432,18 +19461,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn agent_rpc_live_report_connection_logs_valid_event() -> Result<(), Box<dyn Error>> {
+    async fn agent_rpc_live_report_connection_persists_via_store() -> Result<(), Box<dyn Error>> {
         use coder_agent_rpc::AgentRpcHandler;
         use coder_agent_rpc::proto::agent_v2 as agent;
 
         let (_state, store, _token) = setup_agent_test_state()?;
         let agent_id = agent_id_from_store(&store)?;
-        let handler = live_handler_for_store(store, agent_id);
+        let handler = live_handler_for_store(store.clone(), agent_id);
 
+        let connection_id = Uuid::new_v4();
         let _ = handler
             .report_connection(agent::ReportConnectionRequest {
                 connection: Some(agent::Connection {
-                    id: Uuid::new_v4().as_bytes().to_vec(),
+                    id: connection_id.as_bytes().to_vec(),
                     action: agent::connection::Action::Connect as i32,
                     r#type: agent::connection::Type::Vscode as i32,
                     timestamp: None,
@@ -19454,6 +19484,83 @@ pub(crate) mod tests {
             })
             .await
             .map_err(|e| format!("{e:?}"))?;
+
+        let rows = store.connection_logs_snapshot()?;
+        assert_eq!(rows.len(), 1, "expected one persisted connection log");
+        let row = rows.into_iter().next().ok_or("no row")?;
+        assert_eq!(row.connection_status, "connected");
+        assert_eq!(row.connection_type, "vscode");
+        assert_eq!(row.agent_name, "test-agent");
+        assert_eq!(row.workspace_name, "test-workspace");
+        assert_eq!(row.ip, "10.0.0.1");
+        assert_eq!(row.connection_id, Some(connection_id));
+        // Connect events must leave `code` unset — it is populated only on
+        // disconnect via the upsert path.
+        assert!(row.code.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_connection_disconnect_records_code() -> Result<(), Box<dyn Error>>
+    {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let connection_id = Uuid::new_v4();
+        let _ = handler
+            .report_connection(agent::ReportConnectionRequest {
+                connection: Some(agent::Connection {
+                    id: connection_id.as_bytes().to_vec(),
+                    action: agent::connection::Action::Disconnect as i32,
+                    r#type: agent::connection::Type::Ssh as i32,
+                    timestamp: None,
+                    ip: "localhost".to_owned(),
+                    status_code: 255,
+                    reason: Some("client closed".to_owned()),
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let rows = store.connection_logs_snapshot()?;
+        let row = rows.into_iter().next().ok_or("no row")?;
+        assert_eq!(row.connection_status, "disconnected");
+        assert_eq!(row.code, Some(255));
+        // `localhost` must be normalized to `127.0.0.1` to match the Go
+        // handler (github.com/coder/coder#20194).
+        assert_eq!(row.ip, "127.0.0.1");
+        assert_eq!(row.disconnect_reason.as_deref(), Some("client closed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_insert_connection_log_persists_row() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let input = coder_core::InsertConnectionLogInput {
+            id: Uuid::new_v4(),
+            time: OffsetDateTime::now_utc(),
+            connection_status: "connected".to_owned(),
+            organization_id: Uuid::from_u128(1),
+            workspace_owner_id: Uuid::from_u128(2),
+            workspace_id: Uuid::from_u128(3),
+            workspace_name: "ws".to_owned(),
+            agent_name: "agent".to_owned(),
+            connection_type: "ssh".to_owned(),
+            ip: "10.0.0.1".to_owned(),
+            code: None,
+            user_agent: None,
+            user_id: None,
+            slug_or_port: None,
+            connection_id: Some(Uuid::new_v4()),
+            disconnect_reason: None,
+        };
+        store.insert_connection_log(input.clone()).await?;
+        let snapshot = store.connection_logs_snapshot()?;
+        assert_eq!(snapshot, vec![input]);
         Ok(())
     }
 

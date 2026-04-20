@@ -2203,9 +2203,15 @@ impl AppStore for PostgresStore {
         &self,
         filter: ConnectionLogListFilter,
     ) -> Result<ConnectionLogResponse, StorageError> {
-        // The connection_logs table may not exist yet (enterprise-only migration).
-        // Return an empty response; the feature gate middleware prevents unlicensed
-        // access, and the actual SQL will be wired when the migration lands.
+        // The `connection_logs` table now exists (see
+        // `migrations/20260420120000_connection_logs.sql`) and writes
+        // are being persisted via `insert_connection_log`. The full
+        // filter/join port from Go's `GetConnectionLogsOffset` is still
+        // pending — listing is scoped to a follow-up batch. Until then
+        // this returns an empty response so the GET handler doesn't
+        // surface garbage or runtime errors on deployments where the
+        // table exists but no auxiliary joins (users / organizations)
+        // have been wired.
         let _ = filter;
         Ok(ConnectionLogResponse {
             connection_logs: Vec::new(),
@@ -2244,6 +2250,74 @@ impl AppStore for PostgresStore {
             Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("42P01") => Ok(0),
             Err(error) => Err(storage_error(error)),
         }
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        // Mirrors `UpsertConnectionLog` in
+        // `coder/coderd/database/queries/connectionlogs.sql`. The
+        // `ON CONFLICT` target matches the unique index
+        // `idx_connection_logs_connection_id_workspace_id_agent_name`
+        // so that a disconnect report lands on the original connect row
+        // instead of creating a duplicate. The `inet` column is bound
+        // as text and cast at parse time because the workspace-wide
+        // sqlx build does not enable the `ipnetwork` feature.
+        let sql = "INSERT INTO connection_logs (
+                id, connect_time, organization_id, workspace_owner_id,
+                workspace_id, workspace_name, agent_name, type, code,
+                ip, user_agent, user_id, slug_or_port, connection_id,
+                disconnect_reason, disconnect_time
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8::connection_type, $9,
+                $10::inet, $11, $12, $13, $14, $15,
+                CASE WHEN $16::connection_status = 'disconnected'
+                     THEN $2
+                     ELSE NULL
+                END
+            )
+            ON CONFLICT (connection_id, workspace_id, agent_name) DO UPDATE SET
+                disconnect_time = CASE
+                    WHEN $16::connection_status = 'disconnected'
+                         AND connection_logs.disconnect_time IS NULL
+                    THEN EXCLUDED.connect_time
+                    ELSE connection_logs.disconnect_time
+                END,
+                disconnect_reason = CASE
+                    WHEN $16::connection_status = 'disconnected'
+                         AND connection_logs.disconnect_reason IS NULL
+                    THEN EXCLUDED.disconnect_reason
+                    ELSE connection_logs.disconnect_reason
+                END,
+                code = CASE
+                    WHEN $16::connection_status = 'disconnected'
+                         AND connection_logs.code IS NULL
+                    THEN EXCLUDED.code
+                    ELSE connection_logs.code
+                END";
+        sqlx::query(sql)
+            .bind(input.id)
+            .bind(input.time)
+            .bind(input.organization_id)
+            .bind(input.workspace_owner_id)
+            .bind(input.workspace_id)
+            .bind(input.workspace_name)
+            .bind(input.agent_name)
+            .bind(input.connection_type)
+            .bind(input.code)
+            .bind(input.ip)
+            .bind(input.user_agent)
+            .bind(input.user_id)
+            .bind(input.slug_or_port)
+            .bind(input.connection_id)
+            .bind(input.disconnect_reason)
+            .bind(input.connection_status)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

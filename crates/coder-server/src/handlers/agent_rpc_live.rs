@@ -976,10 +976,13 @@ impl AgentRpcHandler for LiveAgentHandler {
 
     /// Ports `coder/coderd/agentapi/connectionlog.go::ReportConnection`.
     ///
-    /// The `connection_logs` table is not yet ported to Rust. We log the
-    /// event at `info` with the decoded action/type names (Devin AI review
-    /// feedback on PR #251 — prefer enum names over raw i32) and return OK.
-    /// Nil / unparseable connection IDs are still rejected per the Go handler.
+    /// Decodes the `Connection` payload, resolves the workspace / agent
+    /// metadata required for the denormalized `connection_logs` columns,
+    /// and upserts via [`AppStore::insert_connection_log`]. Nil /
+    /// unparseable connection IDs are rejected per the Go handler. The
+    /// structured-enum logging kept from PR #260 remains — it is useful
+    /// even after persistence lands because the log is emitted at `info`
+    /// regardless of database success.
     async fn report_connection(&self, req: agent::ReportConnectionRequest) -> Result<(), RpcError> {
         let connection = req
             .connection
@@ -991,26 +994,121 @@ impl AgentRpcHandler for LiveAgentHandler {
                 "connection ID cannot be nil".into(),
             ));
         }
+
         // The enums live on the nested `Connection` message. `as_str_name()`
-        // (prost-generated) gives us stable PROTO field names to log instead
-        // of raw i32 values.
-        let action = agent::connection::Action::try_from(connection.action)
-            .ok()
-            .map(|a| a.as_str_name())
-            .unwrap_or("UNKNOWN");
-        let conn_type = agent::connection::Type::try_from(connection.r#type)
-            .ok()
-            .map(|t| t.as_str_name())
-            .unwrap_or("UNKNOWN");
+        // (prost-generated) gives us stable PROTO field names to log
+        // instead of raw i32 values.
+        let action_proto =
+            agent::connection::Action::try_from(connection.action).map_err(|_| {
+                RpcError::InvalidArgument(format!(
+                    "unknown connection action: {}",
+                    connection.action
+                ))
+            })?;
+        let status = match action_proto {
+            agent::connection::Action::Connect => "connected",
+            agent::connection::Action::Disconnect => "disconnected",
+            agent::connection::Action::Unspecified => {
+                return Err(RpcError::InvalidArgument(
+                    "connection action unspecified".into(),
+                ));
+            }
+        };
+
+        let type_proto = agent::connection::Type::try_from(connection.r#type).map_err(|_| {
+            RpcError::InvalidArgument(format!("unknown connection type: {}", connection.r#type))
+        })?;
+        let connection_type = match type_proto {
+            agent::connection::Type::Ssh => "ssh",
+            agent::connection::Type::Vscode => "vscode",
+            agent::connection::Type::Jetbrains => "jetbrains",
+            agent::connection::Type::ReconnectingPty => "reconnecting_pty",
+            agent::connection::Type::Unspecified => {
+                return Err(RpcError::InvalidArgument(
+                    "connection type unspecified".into(),
+                ));
+            }
+        };
+
+        // Resolve the agent + workspace so we can denormalize name /
+        // organization / owner into the connection_logs row. Matches the
+        // Go handler's `a.AgentFn(ctx)` + `GetWorkspaceByAgentID` path.
+        let agent_row = self
+            .store
+            .find_workspace_agent_by_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find agent: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace agent not found".into()))?;
+        let workspace = self
+            .store
+            .find_workspace_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace not found for agent".into()))?;
+
+        // Some older clients incorrectly report "localhost". Mirrors
+        // `connectionlog.go` L85-L88 (github.com/coder/coder#20194).
+        let log_ip = if connection.ip == "localhost" {
+            "127.0.0.1".to_owned()
+        } else {
+            connection.ip.clone()
+        };
+
+        let reason = connection.reason.clone().unwrap_or_default();
+        let time = connection
+            .timestamp
+            .and_then(|ts| {
+                OffsetDateTime::from_unix_timestamp(ts.seconds)
+                    .ok()
+                    .map(|t| t + time::Duration::nanoseconds(i64::from(ts.nanos)))
+            })
+            .unwrap_or_else(OffsetDateTime::now_utc);
+
+        let code = if matches!(action_proto, agent::connection::Action::Disconnect) {
+            Some(connection.status_code)
+        } else {
+            None
+        };
+
         tracing::info!(
             agent_id = %self.agent_id,
             connection_id = %connection_id,
-            action = action,
-            r#type = conn_type,
+            action = action_proto.as_str_name(),
+            r#type = type_proto.as_str_name(),
             ip = %connection.ip,
             status_code = connection.status_code,
-            "agent report_connection (persistence deferred — connection_logs table not yet ported)",
+            "agent report_connection",
         );
+
+        self.store
+            .insert_connection_log(coder_core::InsertConnectionLogInput {
+                id: Uuid::new_v4(),
+                time,
+                connection_status: status.to_owned(),
+                organization_id: workspace.organization_id,
+                workspace_owner_id: workspace.owner_id,
+                workspace_id: workspace.id,
+                workspace_name: workspace.name,
+                agent_name: agent_row.name,
+                connection_type: connection_type.to_owned(),
+                ip: log_ip,
+                code,
+                // Agent RPC reports SSH-like connections only — user_agent
+                // / user_id / slug_or_port are the preserve of the web
+                // workspace-app handlers, not this path.
+                user_agent: None,
+                user_id: None,
+                slug_or_port: None,
+                connection_id: Some(connection_id),
+                disconnect_reason: if reason.is_empty() {
+                    None
+                } else {
+                    Some(reason)
+                },
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert connection log: {e}")))?;
+
         Ok(())
     }
 

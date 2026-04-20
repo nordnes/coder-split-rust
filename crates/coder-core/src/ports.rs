@@ -530,6 +530,60 @@ pub struct ConnectionLogListFilter {
     pub offset: u32,
 }
 
+/// Row inserted into `connection_logs`. Mirrors
+/// `database.UpsertConnectionLogParams` in
+/// `coder/coderd/database/queries/connectionlogs.sql` — the `ON CONFLICT`
+/// clause on `(connection_id, workspace_id, agent_name)` means a second
+/// insert with `connection_status = "disconnected"` updates the
+/// `disconnect_time`, `disconnect_reason`, and `code` of the matching
+/// row instead of creating a duplicate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertConnectionLogInput {
+    /// Stable row identifier for the connect event. The upsert matches
+    /// on `(connection_id, workspace_id, agent_name)`, so the caller
+    /// may freely generate a fresh UUID for every report.
+    pub id: Uuid,
+    /// Time the connect (or disconnect) event occurred.
+    pub time: OffsetDateTime,
+    /// Connection lifecycle status — `"connected"` or `"disconnected"`.
+    /// When `"disconnected"`, the store upserts `disconnect_time`,
+    /// `disconnect_reason`, and `code` onto any existing matching row.
+    pub connection_status: String,
+    /// Organization that owns the workspace.
+    pub organization_id: Uuid,
+    /// Owner of the workspace.
+    pub workspace_owner_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Workspace name (denormalized for retention-safe reporting).
+    pub workspace_name: String,
+    /// Agent name inside the workspace.
+    pub agent_name: String,
+    /// Connection type: `ssh`, `vscode`, `jetbrains`, `reconnecting_pty`,
+    /// `workspace_app`, or `port_forwarding`.
+    pub connection_type: String,
+    /// Client IP address. Stored as a Postgres `inet`.
+    pub ip: String,
+    /// Either the SSH exit code or the HTTP status code of the web
+    /// request. Only set for disconnect events on SSH-like connections;
+    /// ignored (kept NULL in the DB) on connect events.
+    pub code: Option<i32>,
+    /// User-Agent header for web events. `None` for SSH events.
+    pub user_agent: Option<String>,
+    /// Authenticated user who initiated a web connection. `None` for
+    /// SSH events (the agent cannot attribute the session).
+    pub user_id: Option<Uuid>,
+    /// App slug or forwarded port. `None` for SSH events.
+    pub slug_or_port: Option<String>,
+    /// SSH connection identifier reported by the agent. `None` for web
+    /// events (workspace_app / port_forwarding).
+    pub connection_id: Option<Uuid>,
+    /// Human-readable reason attached to a disconnect event. `None` on
+    /// connect and on disconnect events where the agent reported no
+    /// reason.
+    pub disconnect_reason: Option<String>,
+}
+
 /// Persisted audit event inserted either by handlers or the audit sink.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PersistAuditLogInput {
@@ -2459,6 +2513,17 @@ pub trait OperationalStore: Send + Sync {
         limit: i64,
     ) -> Result<u64, StorageError>;
 
+    /// Inserts (or upserts) one connection log row. Mirrors Go's
+    /// `UpsertConnectionLog` query at
+    /// `coder/coderd/database/queries/connectionlogs.sql` — the
+    /// underlying unique index on `(connection_id, workspace_id,
+    /// agent_name)` means repeat inserts with the same `connection_id`
+    /// merge the disconnect fields onto the existing row.
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError>;
+
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
         &self,
@@ -3479,6 +3544,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         older_than: OffsetDateTime,
         limit: i64,
     ) -> Result<u64, StorageError>;
+
+    /// Inserts (or upserts) one connection log row. Mirrors Go's
+    /// `UpsertConnectionLog` query at
+    /// `coder/coderd/database/queries/connectionlogs.sql` — the
+    /// underlying unique index on `(connection_id, workspace_id,
+    /// agent_name)` means repeat inserts with the same `connection_id`
+    /// merge the disconnect fields onto the existing row.
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError>;
 
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
@@ -7774,6 +7850,13 @@ where
         AppStore::delete_old_connection_logs(self, older_than, limit).await
     }
 
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        AppStore::insert_connection_log(self, input).await
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
@@ -8049,6 +8132,13 @@ where
         limit: i64,
     ) -> Result<u64, StorageError> {
         (**self).delete_old_connection_logs(older_than, limit).await
+    }
+
+    async fn insert_connection_log(
+        &self,
+        input: InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        (**self).insert_connection_log(input).await
     }
 
     async fn batch_insert_workspace_build_parameters(

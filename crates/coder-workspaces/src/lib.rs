@@ -2182,6 +2182,13 @@ mod tests {
             Ok(0)
         }
 
+        async fn insert_connection_log(
+            &self,
+            _input: coder_core::InsertConnectionLogInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         async fn batch_insert_workspace_build_parameters(
             &self,
             _params: Vec<coder_core::ports::WorkspaceBuildParameterRecord>,

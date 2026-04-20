@@ -569,6 +569,15 @@ impl AppStore for BenchStore {
         Ok(0)
     }
 
+    async fn insert_connection_log(
+        &self,
+        _input: coder_core::InsertConnectionLogInput,
+    ) -> Result<(), StorageError> {
+        // BenchStore has no persistence layer. Return Ok so benchmark
+        // harnesses that exercise the ReportConnection path don't fail.
+        Ok(())
+    }
+
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
