@@ -1058,17 +1058,86 @@ impl AgentRpcHandler for LiveAgentHandler {
 
     /// Ports `coder/coderd/agentapi/subagent.go::CreateSubAgent`.
     ///
-    /// TODO-sub-agent-create: the `insert_workspace_agent` AppStore method
-    /// is not yet present, so we return `Unimplemented` rather than silently
-    /// succeeding. The router still advertises the RPC so clients can tell
-    /// the difference between "not yet supported" and "unknown endpoint".
+    /// Inserts a new workspace agent row with `parent_id = self.agent_id`,
+    /// inheriting `resource_id`, `connection_timeout_seconds`,
+    /// `troubleshooting_url`, and `api_key_scope` from the parent agent.
+    /// Apps in the request are not yet persisted — Go performs an additional
+    /// `UpsertWorkspaceApp` loop; the app-persistence loop is deferred to a
+    /// follow-up batch. A freshly generated UUID serves as the auth token so
+    /// the sub-agent can authenticate back to coderd.
     async fn create_sub_agent(
         &self,
-        _req: agent::CreateSubAgentRequest,
+        req: agent::CreateSubAgentRequest,
     ) -> Result<agent::CreateSubAgentResponse, RpcError> {
-        Err(RpcError::Unimplemented(
-            "CreateSubAgent (sub-agent persistence not yet ported)".into(),
-        ))
+        if req.name.is_empty() {
+            return Err(RpcError::InvalidArgument(
+                "agent name cannot be empty".into(),
+            ));
+        }
+
+        let parent = self
+            .store
+            .find_workspace_agent_by_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find parent agent: {e}")))?
+            .ok_or_else(|| RpcError::Internal("parent workspace agent not found".into()))?;
+
+        let now = OffsetDateTime::now_utc();
+        let new_id = Uuid::new_v4();
+        let auth_token = Uuid::new_v4();
+        let display_apps: Vec<String> = req
+            .display_apps
+            .iter()
+            .filter_map(|v| {
+                agent::create_sub_agent_request::DisplayApp::try_from(*v)
+                    .ok()
+                    .map(|d| match d {
+                        agent::create_sub_agent_request::DisplayApp::Vscode => "vscode",
+                        agent::create_sub_agent_request::DisplayApp::VscodeInsiders => {
+                            "vscode_insiders"
+                        }
+                        agent::create_sub_agent_request::DisplayApp::WebTerminal => "web_terminal",
+                        agent::create_sub_agent_request::DisplayApp::SshHelper => "ssh_helper",
+                        agent::create_sub_agent_request::DisplayApp::PortForwardingHelper => {
+                            "port_forwarding_helper"
+                        }
+                    })
+                    .map(str::to_owned)
+            })
+            .collect();
+
+        let row = self
+            .store
+            .insert_workspace_agent(coder_core::InsertWorkspaceAgentInput {
+                id: new_id,
+                parent_id: Some(self.agent_id),
+                created_at: now,
+                updated_at: now,
+                name: req.name,
+                resource_id: parent.resource_id,
+                auth_token,
+                auth_instance_id: None,
+                architecture: req.architecture,
+                operating_system: req.operating_system,
+                directory: req.directory,
+                connection_timeout_seconds: parent.connection_timeout_seconds,
+                troubleshooting_url: parent.troubleshooting_url,
+                motd_file: String::new(),
+                display_apps,
+                display_order: 0,
+                api_key_scope: parent.api_key_scope,
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert sub agent: {e}")))?;
+
+        Ok(agent::CreateSubAgentResponse {
+            agent: Some(agent::SubAgent {
+                name: row.name,
+                id: row.id.as_bytes().to_vec(),
+                auth_token: row.auth_token.as_bytes().to_vec(),
+            }),
+            app_creation_errors: Vec::new(),
+        })
     }
 
     /// Ports `coder/coderd/agentapi/subagent.go::DeleteSubAgent`.

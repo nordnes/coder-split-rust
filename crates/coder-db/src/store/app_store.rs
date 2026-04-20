@@ -6175,6 +6175,64 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
+    // ── workspace_agent insert (sub-agents) ──
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent(
+        &self,
+        input: InsertWorkspaceAgentInput,
+    ) -> Result<WorkspaceAgentRow, StorageError> {
+        let display_apps: Vec<String> = input.display_apps.clone();
+        let row = sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "INSERT INTO workspace_agents (
+                id, parent_id, created_at, updated_at, name,
+                resource_id, auth_token, auth_instance_id,
+                architecture, operating_system, directory,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                display_apps, display_order, api_key_scope
+             ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8,
+                $9, $10, $11,
+                $12, $13, $14,
+                $15::text[]::display_app[], $16, $17::agent_key_scope_enum
+             )
+             RETURNING
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables::text AS environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope",
+        )
+        .bind(input.id)
+        .bind(input.parent_id)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .bind(&input.name)
+        .bind(input.resource_id)
+        .bind(input.auth_token)
+        .bind(&input.auth_instance_id)
+        .bind(&input.architecture)
+        .bind(&input.operating_system)
+        .bind(&input.directory)
+        .bind(input.connection_timeout_seconds)
+        .bind(&input.troubleshooting_url)
+        .bind(&input.motd_file)
+        .bind(&display_apps)
+        .bind(input.display_order)
+        .bind(&input.api_key_scope)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(workspace_agent_row_from_stored(row))
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_apps_by_agent_id(
         &self,
@@ -6584,25 +6642,52 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
-    /// Deletes a workspace sub-agent by id. The backing table is not yet
-    /// ported (see `TODO-sub-agent-create`), so the Postgres impl is a
-    /// no-op sentinel that keeps the live agent handler happy; the
-    /// parent-ownership check in the handler runs first and validates the
-    /// lookup.
+    /// Deletes a workspace sub-agent by id. Mirrors Go's
+    /// `DeleteWorkspaceSubAgentByID` — marks the row `deleted = true`.
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn delete_workspace_sub_agent(&self, _sub_agent_id: Uuid) -> Result<(), StorageError> {
+    async fn delete_workspace_sub_agent(&self, sub_agent_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE workspace_agents SET deleted = true WHERE id = $1")
+            .bind(sub_agent_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
         Ok(())
     }
 
-    /// Lists workspace agents whose parent id matches. Returns an empty
-    /// list because the sub-agent projection is not yet ported. Callers
-    /// that need the true row set will see `ListSubAgentsResponse{agents:[]}`.
+    /// Lists workspace agents whose parent id matches. Mirrors Go's
+    /// `GetWorkspaceAgentsByParentID` in
+    /// `coder/coderd/database/queries/workspaceagents.sql`.
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_agents_by_parent_id(
         &self,
-        _parent_agent_id: Uuid,
+        parent_agent_id: Uuid,
     ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
-        Ok(Vec::new())
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables::text AS environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE parent_id = $1 AND deleted = false
+             ORDER BY created_at ASC",
+        )
+        .bind(parent_agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_row_from_stored)
+            .collect())
     }
 
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
