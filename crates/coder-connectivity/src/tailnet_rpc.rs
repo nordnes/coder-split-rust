@@ -1,17 +1,20 @@
-//! Tailnet DRPC service — unary RPC handlers.
+//! Tailnet DRPC service — unary and streaming RPC handlers.
 //!
-//! Ports the two **unary** RPCs from the Go `coder.tailnet.v2.Tailnet`
-//! service defined in `coder/tailnet/proto/tailnet.proto`:
+//! Ports RPCs from the Go `coder.tailnet.v2.Tailnet` service defined in
+//! `coder/tailnet/proto/tailnet.proto`:
 //!
 //! * [`TailnetRpcService::post_telemetry`] — receive a batch of
 //!   `TelemetryEvent` messages and enqueue them on an mpsc sink for the
 //!   coder-server to drain.
 //! * [`TailnetRpcService::refresh_resume_token`] — produce a fresh signed
 //!   resume token that identifies a peer across reconnects.
+//! * [`TailnetRpcService::stream_derp_maps`] — server-stream the current
+//!   DERP map to the client. Initial-snapshot only for now; the
+//!   reactive push-on-change path is deferred
+//!   (`TODO-tailnet-derp-map-live-updates`).
 //!
-//! The three streaming RPCs on the same service — `StreamDERPMaps`,
-//! `WorkspaceUpdates`, `Coordinate` — are **deferred** to a follow-up
-//! batch so this change stays small.
+//! The remaining streaming RPCs (`WorkspaceUpdates`, `Coordinate`) are
+//! ported in sibling batches so each change stays small.
 //!
 //! This module depends on [`coder_agent_rpc::proto::tailnet_v2`] for the
 //! protobuf message types. It does **not** modify `coder-agent-rpc`; the
@@ -21,14 +24,44 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use base64::Engine as _;
+use coder_agent_rpc::handlers::{ResponseStream, RpcContext, RpcError, ServerStreamHandler};
 use coder_agent_rpc::proto::tailnet_v2 as tailnet;
+use futures_util::stream::{self, StreamExt};
+use prost::Message as _;
 use prost_types::{Duration as PbDuration, Timestamp as PbTimestamp};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+/// DRPC method path for `StreamDERPMaps`. Mirrors the Go
+/// `DRPCTailnet_StreamDERPMapsStream` registration.
+pub const STREAM_DERP_MAPS_METHOD: &str = "/coder.tailnet.v2.Tailnet/StreamDERPMaps";
+
+/// Trait returning the current DERP map snapshot. Modelled on Go's
+/// `DerpMapFn` in `coder/tailnet/service.go`. Implementations should be
+/// cheap to call (typical storage is a `watch::Receiver::borrow()` on an
+/// in-process DERP config).
+pub trait DerpMapProvider: Send + Sync {
+    /// Returns the current DERP map. When this returns `None` the
+    /// streaming handler treats the stream as finished, matching the Go
+    /// `io.EOF` close signal.
+    fn current(&self) -> Option<tailnet::DerpMap>;
+}
+
+/// Convenience: any closure `Fn() -> Option<DerpMap>` satisfies
+/// [`DerpMapProvider`].
+impl<F> DerpMapProvider for F
+where
+    F: Fn() -> Option<tailnet::DerpMap> + Send + Sync,
+{
+    fn current(&self) -> Option<tailnet::DerpMap> {
+        self()
+    }
+}
 
 /// Resume-token TTL chosen to match Go's `DefaultResumeTokenExpiry`
 /// (`coder/tailnet/resume.go`).
@@ -168,9 +201,9 @@ pub fn verify_resume_token(
     Ok(peer_id)
 }
 
-/// Service that implements the two unary tailnet RPCs. Streaming
-/// methods are intentionally not part of this type — they go in a
-/// follow-up batch.
+/// Service that implements the tailnet RPCs. Two unary methods and one
+/// server-stream method are live today; `WorkspaceUpdates` and
+/// `Coordinate` are in sibling batches.
 ///
 /// Construct via [`TailnetRpcService::new`] or [`TailnetRpcService::with_stub_key`].
 pub struct TailnetRpcService {
@@ -179,19 +212,34 @@ pub struct TailnetRpcService {
     /// Default resume-token lifetime; clients should refresh at half of
     /// this.
     token_ttl_secs: i64,
+    /// Source of the current DERP map. Defaults to returning an empty
+    /// map so that `stream_derp_maps` always emits at least one frame
+    /// when wired up with the default constructor.
+    derp_map_provider: Arc<dyn DerpMapProvider>,
 }
 
 impl TailnetRpcService {
     /// Creates the service with an explicit signing key (e.g. the
     /// `app_signing_key` already held by `AppState`) and a telemetry
-    /// sink.
+    /// sink. The DERP map provider defaults to an empty-map stub; use
+    /// [`TailnetRpcService::with_derp_map_provider`] to install the real
+    /// source.
     #[must_use]
     pub fn new(telemetry_tx: TelemetrySender, signing_key: &[u8]) -> Self {
         Self {
             telemetry_tx,
             signing_key: Arc::from(signing_key),
             token_ttl_secs: DEFAULT_RESUME_TOKEN_EXPIRY_SECS,
+            derp_map_provider: Arc::new(|| Some(tailnet::DerpMap::default())),
         }
+    }
+
+    /// Installs a custom DERP map provider (production wiring). The
+    /// default from [`TailnetRpcService::new`] returns an empty map.
+    #[must_use]
+    pub fn with_derp_map_provider(mut self, provider: Arc<dyn DerpMapProvider>) -> Self {
+        self.derp_map_provider = provider;
+        self
     }
 
     /// Creates the service with a hardcoded placeholder key. Intended
@@ -256,6 +304,61 @@ impl TailnetRpcService {
     pub fn signing_key(&self) -> &[u8] {
         &self.signing_key
     }
+
+    /// Returns the current DERP map snapshot as a protobuf message, or
+    /// `None` if the provider signalled end-of-stream (mirroring Go's
+    /// nil-returns-EOF convention in `coder/tailnet/service.go`).
+    #[must_use]
+    pub fn build_current_derp_map(&self) -> Option<tailnet::DerpMap> {
+        self.derp_map_provider.current()
+    }
+
+    /// Implements `StreamDERPMaps`. Emits the current DERP map once and
+    /// then closes the stream.
+    ///
+    /// TODO-tailnet-derp-map-live-updates: subscribe to a DERP config
+    /// change notifier and emit a fresh snapshot on each change. Deferred
+    /// — requires a notify channel that is not yet wired from the DERP
+    /// config surface used by this crate.
+    pub fn stream_derp_maps(
+        &self,
+        _req: tailnet::StreamDerpMapsRequest,
+    ) -> impl futures_util::Stream<Item = Result<tailnet::DerpMap, RpcError>> + Send + 'static {
+        let snapshot = self.build_current_derp_map();
+        stream::iter(snapshot.into_iter().map(Ok::<_, RpcError>))
+    }
+}
+
+/// Server-stream handler wiring [`TailnetRpcService::stream_derp_maps`]
+/// into the [`ServerStreamHandler`] DRPC dispatcher from
+/// `coder-agent-rpc`. Each emitted `DerpMap` is prost-encoded and
+/// forwarded verbatim as the DRPC `Message` body.
+pub struct StreamDerpMapsHandler {
+    service: Arc<TailnetRpcService>,
+}
+
+impl StreamDerpMapsHandler {
+    /// Wraps `service` so it can be registered against the
+    /// [`STREAM_DERP_MAPS_METHOD`] DRPC path.
+    #[must_use]
+    pub fn new(service: Arc<TailnetRpcService>) -> Self {
+        Self { service }
+    }
+}
+
+#[async_trait]
+impl ServerStreamHandler for StreamDerpMapsHandler {
+    async fn invoke(
+        &self,
+        _ctx: RpcContext,
+        request_body: Vec<u8>,
+    ) -> Result<ResponseStream, RpcError> {
+        let req = tailnet::StreamDerpMapsRequest::decode(request_body.as_slice())
+            .map_err(|e| RpcError::InvalidArgument(format!("decode StreamDERPMapsRequest: {e}")))?;
+        let typed = self.service.stream_derp_maps(req);
+        let encoded = typed.map(|item| item.map(|msg| msg.encode_to_vec()));
+        Ok(Box::pin(encoded))
+    }
 }
 
 #[cfg(test)]
@@ -302,5 +405,29 @@ mod tests {
         assert_eq!(verified, peer_id);
         // Expired token must be rejected.
         assert!(verify_resume_token(svc.signing_key(), &resp.token, exp + 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_derp_maps_emits_initial_snapshot() {
+        let (tx, _rx) = telemetry_channel();
+        let mut map = tailnet::DerpMap::default();
+        map.regions.insert(
+            1,
+            tailnet::derp_map::Region {
+                region_id: 1,
+                region_code: "test".into(),
+                region_name: "test".into(),
+                ..Default::default()
+            },
+        );
+        let snapshot = map.clone();
+        let svc = TailnetRpcService::with_stub_key(tx)
+            .with_derp_map_provider(Arc::new(move || Some(snapshot.clone())));
+        let mut stream = Box::pin(svc.stream_derp_maps(tailnet::StreamDerpMapsRequest {}));
+        let Some(Ok(first)) = stream.next().await else {
+            unreachable!("expected one DERP map frame");
+        };
+        assert_eq!(first, map);
+        assert!(stream.next().await.is_none(), "stream must end after one");
     }
 }
