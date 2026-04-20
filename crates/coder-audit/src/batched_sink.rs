@@ -4,11 +4,19 @@
 //! collects events and flushes them in batches — either when the batch
 //! reaches `max_batch_size` or after `flush_interval` elapses,
 //! whichever comes first.
+//!
+//! The sink runs under the `system_restricted` actor context
+//! ([`coder_rbac::system_actors::system_restricted`]) when flushing
+//! batches to the store. The Go reference has no dedicated "auditor"
+//! system subject — audit writes run under whatever caller context
+//! invoked the action; background flush simply needs enough privilege
+//! to call `batch_insert_audit_logs`, which `system_restricted` covers.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use coder_rbac::{Actor, system_actors};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -29,6 +37,11 @@ pub struct BatchedAuditSink {
     /// Handle to the background flush task.
     /// `None` after [`close`](AuditSink::close) has been called.
     flush_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// System-actor context used by the background flush task when
+    /// persisting batches. Stored for diagnostics and for the future
+    /// `Authorized<S>` wrap of `batch_insert_audit_logs`. See
+    /// [`coder_rbac::system_actors::system_restricted`].
+    actor: Actor,
 }
 
 impl BatchedAuditSink {
@@ -41,7 +54,18 @@ impl BatchedAuditSink {
         Self {
             tx: std::sync::Mutex::new(Some(tx)),
             flush_task: tokio::sync::Mutex::new(Some(flush_task)),
+            // TODO-dbauthz-full-wrap: route batch inserts through the
+            // `Authorized<S>` wrap so the system actor is enforced at
+            // the store boundary.
+            actor: system_actors::system_restricted(),
         }
+    }
+
+    /// Returns the system actor this sink's background flush task runs
+    /// under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 }
 
@@ -292,5 +316,23 @@ mod tests {
 
         let collected = inner.collected();
         assert_eq!(collected.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn batched_sink_uses_system_restricted_actor() {
+        // Regression guard for W0.S4 wiring: the sink's background flush
+        // task runs under the `system` system actor. Go has no dedicated
+        // audit subject, so we use `system_restricted` for DB writes.
+        let inner = Arc::new(CollectingSink::new());
+        let sink = BatchedAuditSink::new(
+            Arc::clone(&inner) as Arc<dyn AuditSink>,
+            Duration::from_secs(60),
+            100,
+        );
+        assert!(
+            system_actors::is_system(sink.actor()),
+            "sink actor must be a system actor",
+        );
+        assert_eq!(sink.actor().username, "system");
     }
 }

@@ -6,9 +6,10 @@
 //! deletions to a bounded row count per tick so a long-lived retention
 //! shrinkage does not pin the write-ahead log on a single sweep.
 //!
-//! Runs under the `system_restricted` actor context
-//! ([`coder_rbac::system_actors::system_restricted`]). Today only the
-//! list methods in `coder-db/src/dbauthz.rs` consult the actor; the
+//! Runs under the `connection_logger` actor context
+//! ([`coder_rbac::system_actors::connection_logger`]), mirroring Go's
+//! `AsConnectionLogger` helper. Today only the list methods in
+//! `coder-db/src/dbauthz.rs` consult the actor; the
 //! `delete_old_connection_logs` call below carries a
 //! `TODO-dbauthz-full-wrap` comment for the eventual Authorized<S> wrap.
 //!
@@ -63,7 +64,7 @@ impl Default for ConnectionLogPrunerOptions {
 pub struct ConnectionLogPruner {
     handle: JoinHandle<()>,
     /// System-actor context the pruner runs under. See
-    /// [`coder_rbac::system_actors::system_restricted`]. Stored for
+    /// [`coder_rbac::system_actors::connection_logger`]. Stored for
     /// diagnostics and for the future `Authorized<S>` wrap of
     /// `delete_old_connection_logs`.
     actor: Actor,
@@ -85,9 +86,9 @@ impl ConnectionLogPruner {
             handle,
             // TODO-dbauthz-full-wrap: once `Authorized<S>` wraps
             // `delete_old_connection_logs`, route that call through the
-            // wrapper so the system-restricted actor is enforced at the
-            // store boundary.
-            actor: system_actors::system_restricted(),
+            // wrapper so the connection-logger actor is enforced at the
+            // store boundary. Mirrors Go's `AsConnectionLogger`.
+            actor: system_actors::connection_logger(),
         }
     }
 
@@ -189,16 +190,17 @@ mod tests {
     }
 
     #[test]
-    fn pruner_uses_system_restricted_actor() {
+    fn pruner_uses_connection_logger_actor() {
         // Regression guard for W0.S4 wiring: the pruner actor factory
-        // must hand back the `system` system actor. We exercise the
-        // factory directly rather than constructing a full pruner
-        // (that requires a real `AppStore` supertrait impl + runtime).
-        let actor = system_actors::system_restricted();
+        // must hand back the `connectionlogger` system actor, mirroring
+        // Go's `AsConnectionLogger`. We exercise the factory directly
+        // rather than constructing a full pruner (that requires a real
+        // `AppStore` supertrait impl + runtime).
+        let actor = system_actors::connection_logger();
         assert!(
             system_actors::is_system(&actor),
-            "system_restricted() must be a system actor",
+            "connection_logger() must be a system actor",
         );
-        assert_eq!(actor.username, "system");
+        assert_eq!(actor.username, "connectionlogger");
     }
 }
