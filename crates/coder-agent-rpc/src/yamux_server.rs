@@ -20,7 +20,7 @@ use yamux::{Config, Connection, Mode};
 
 use crate::error::{DrpcError, DrpcResult};
 use crate::handlers::AgentRpcHandler;
-use crate::server::serve_drpc_stream;
+use crate::server::{StreamRegistry, serve_drpc_stream, serve_drpc_stream_with_streams};
 
 /// Builds the yamux [`Config`] used for agent DRPC sessions.
 ///
@@ -58,6 +58,8 @@ fn server_config() -> Config {
 
 /// Runs a yamux server over `transport`, accepting DRPC streams and
 /// dispatching each to `handler`. Completes when the session closes.
+/// Unary-only variant; for streaming RPCs use
+/// [`serve_yamux_with_streams`].
 ///
 /// `transport` must be a tokio-compatible bidirectional byte stream —
 /// typically the adapter that wraps the accepted WebSocket.
@@ -80,6 +82,56 @@ where
                     // so we can reuse the tokio-based DRPC framing code.
                     let compat = FuturesAsyncReadCompatExt::compat(stream);
                     if let Err(err) = serve_drpc_stream(compat, handler).await {
+                        match err {
+                            DrpcError::Closed => {}
+                            other => warn!(error = %other, "agent drpc stream ended with error"),
+                        }
+                    }
+                });
+            }
+            Some(Err(err)) => {
+                debug!(error = %err, "yamux session error");
+                return Err(DrpcError::Protocol(format!("yamux: {err}")));
+            }
+            None => {
+                debug!("yamux session closed");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Runs a yamux server over `transport`, accepting DRPC streams and
+/// dispatching each to the combination of `handler` (unary fallback) and
+/// `streams` (server-stream + bidi registry).
+///
+/// This is the variant to use for services — like the tailnet service —
+/// that ship streaming RPCs. Methods registered in `streams` are routed
+/// to their streaming handlers; everything else falls through to
+/// `handler`.
+pub async fn serve_yamux_with_streams<T, H>(
+    transport: T,
+    handler: Arc<H>,
+    streams: Arc<StreamRegistry>,
+) -> DrpcResult<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: AgentRpcHandler + 'static,
+{
+    let compat: Compat<T> = transport.compat();
+    let mut connection: Connection<Compat<T>> =
+        Connection::new(compat, server_config(), Mode::Server);
+
+    loop {
+        let next = poll_fn(|cx| connection.poll_next_inbound(cx)).await;
+        match next {
+            Some(Ok(stream)) => {
+                let handler = handler.clone();
+                let streams = streams.clone();
+                tokio::spawn(async move {
+                    let compat = FuturesAsyncReadCompatExt::compat(stream);
+                    if let Err(err) = serve_drpc_stream_with_streams(compat, handler, streams).await
+                    {
                         match err {
                             DrpcError::Closed => {}
                             other => warn!(error = %other, "agent drpc stream ended with error"),
