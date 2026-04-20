@@ -1079,6 +1079,11 @@ mod tests {
     #[async_trait]
     impl CryptoKeyStore for SharedLockStore {
         async fn list_all(&self) -> Result<Vec<CryptoKeyRow>, StorageError> {
+            // Yield to let a co-scheduled rotator (under `tokio::join!`)
+            // observe the `held = true` state before this sweep completes
+            // and releases the lock. Mirrors the real-world window where
+            // a replica's Postgres transaction is in flight.
+            tokio::task::yield_now().await;
             Ok(self.inner.lock().expect("lock poisoned").clone())
         }
         async fn list_by_feature(

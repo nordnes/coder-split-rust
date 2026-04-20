@@ -125,8 +125,11 @@ async fn run_loop(
                 return;
             }
             _ = interval.tick() => {
+                let delta = time::Duration::try_from(options.retention)
+                    .unwrap_or(time::Duration::MAX);
                 let cutoff = OffsetDateTime::now_utc()
-                    - time::Duration::try_from(options.retention).unwrap_or(time::Duration::MAX);
+                    .checked_sub(delta)
+                    .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                 match store
                     .delete_old_connection_logs(cutoff, options.batch_size)
                     .await
@@ -154,7 +157,8 @@ mod tests {
     use super::*;
 
     fn compute_cutoff(retention: Duration, now: OffsetDateTime) -> OffsetDateTime {
-        now - time::Duration::try_from(retention).unwrap_or(time::Duration::MAX)
+        let delta = time::Duration::try_from(retention).unwrap_or(time::Duration::MAX);
+        now.checked_sub(delta).unwrap_or(OffsetDateTime::UNIX_EPOCH)
     }
 
     #[test]
@@ -167,8 +171,11 @@ mod tests {
     #[test]
     fn cutoff_clamps_on_overflow() {
         // `time::Duration::try_from` saturates at `time::Duration::MAX`
-        // if the std duration exceeds its representable range — assert
-        // the conversion does not panic; the value itself is unused.
+        // if the std duration exceeds its representable range, and
+        // subtracting that from `now` underflows the `OffsetDateTime`
+        // representable range — so use a checked subtraction and clamp
+        // to `UNIX_EPOCH` on underflow. This test asserts the helper
+        // never panics on pathological retention values.
         let cutoff = compute_cutoff(Duration::MAX, OffsetDateTime::now_utc());
         assert!(cutoff.year() != 0);
     }

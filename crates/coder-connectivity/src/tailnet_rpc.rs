@@ -12,9 +12,12 @@
 //!   DERP map to the client. Initial-snapshot only for now; the
 //!   reactive push-on-change path is deferred
 //!   (`TODO-tailnet-derp-map-live-updates`).
-//!
-//! The remaining streaming RPCs (`WorkspaceUpdates`, `Coordinate`) are
-//! ported in sibling batches so each change stays small.
+//! * [`TailnetRpcService::workspace_updates`] — server-stream the caller's
+//!   owned workspaces. Initial-snapshot only; the reactive path is
+//!   deferred (`TODO-tailnet-workspace-updates-live`).
+//! * [`TailnetRpcService::coordinate`] — bidi-stream handshake +
+//!   peer registration. Reactive node-update fan-out is deferred
+//!   (`TODO-tailnet-coordinate-node-updates`).
 //!
 //! This module depends on [`coder_agent_rpc::proto::tailnet_v2`] for the
 //! protobuf message types. It does **not** modify `coder-agent-rpc`; the
@@ -26,9 +29,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use coder_agent_rpc::handlers::{ResponseStream, RpcContext, RpcError, ServerStreamHandler};
+use coder_agent_rpc::handlers::{
+    BidiResponseSink, BidiStreamHandler, ResponseStream, RpcContext, RpcError, ServerStreamHandler,
+};
 use coder_agent_rpc::proto::tailnet_v2 as tailnet;
-use futures_util::stream::{self, StreamExt};
+use coder_core::ports::{StorageError, WorkspaceListFilter, WorkspaceRecord};
+use futures_util::stream::{self, Stream, StreamExt};
 use prost::Message as _;
 use prost_types::{Duration as PbDuration, Timestamp as PbTimestamp};
 use sha2::{Digest, Sha256};
@@ -37,9 +43,19 @@ use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::tailnet::{InMemoryCoordinator, PeerKind, TailnetCoordinator};
+
 /// DRPC method path for `StreamDERPMaps`. Mirrors the Go
 /// `DRPCTailnet_StreamDERPMapsStream` registration.
 pub const STREAM_DERP_MAPS_METHOD: &str = "/coder.tailnet.v2.Tailnet/StreamDERPMaps";
+
+/// DRPC method path for `WorkspaceUpdates`. Mirrors the Go
+/// `DRPCTailnet_WorkspaceUpdatesStream` registration.
+pub const WORKSPACE_UPDATES_METHOD: &str = "/coder.tailnet.v2.Tailnet/WorkspaceUpdates";
+
+/// DRPC method path for `Coordinate`. Mirrors the Go
+/// `DRPCTailnet_CoordinateStream` registration.
+pub const COORDINATE_METHOD: &str = "/coder.tailnet.v2.Tailnet/Coordinate";
 
 /// Trait returning the current DERP map snapshot. Modelled on Go's
 /// `DerpMapFn` in `coder/tailnet/service.go`. Implementations should be
@@ -60,6 +76,37 @@ where
 {
     fn current(&self) -> Option<tailnet::DerpMap> {
         self()
+    }
+}
+
+/// Storage lookup used by [`TailnetRpcService::workspace_updates`] to
+/// build the initial workspace snapshot for the caller's owner id.
+///
+/// Ported from the Go `WorkspaceUpdatesProvider.Subscribe` surface in
+/// `coder/tailnet/service.go`; the Rust port currently emits only the
+/// initial snapshot (see `TODO-tailnet-workspace-updates-live`).
+#[async_trait]
+pub trait TailnetWorkspaceLookup: Send + Sync {
+    /// Lists workspaces matching `filter`. The returned tuple is
+    /// `(rows, total_count)`, matching [`coder_core::ports::WorkspaceStore`].
+    async fn list_workspaces(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError>;
+}
+
+/// Default workspace lookup that always returns an empty list. Used when
+/// the service is constructed without a real database-backed lookup.
+#[derive(Default)]
+struct EmptyWorkspaceLookup;
+
+#[async_trait]
+impl TailnetWorkspaceLookup for EmptyWorkspaceLookup {
+    async fn list_workspaces(
+        &self,
+        _filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        Ok((Vec::new(), 0))
     }
 }
 
@@ -216,6 +263,14 @@ pub struct TailnetRpcService {
     /// map so that `stream_derp_maps` always emits at least one frame
     /// when wired up with the default constructor.
     derp_map_provider: Arc<dyn DerpMapProvider>,
+    /// Storage-backed workspace lookup used for `workspace_updates`.
+    /// Defaults to an empty list; wire a real implementation via
+    /// [`TailnetRpcService::with_workspace_lookup`].
+    lookup: Arc<dyn TailnetWorkspaceLookup>,
+    /// In-memory tailnet coordinator used by `coordinate` to register
+    /// peers. Optional: when `None`, the `coordinate` RPC rejects with
+    /// `Internal`.
+    coordinator: Option<Arc<InMemoryCoordinator>>,
 }
 
 impl TailnetRpcService {
@@ -231,6 +286,8 @@ impl TailnetRpcService {
             signing_key: Arc::from(signing_key),
             token_ttl_secs: DEFAULT_RESUME_TOKEN_EXPIRY_SECS,
             derp_map_provider: Arc::new(|| Some(tailnet::DerpMap::default())),
+            lookup: Arc::new(EmptyWorkspaceLookup),
+            coordinator: None,
         }
     }
 
@@ -239,6 +296,22 @@ impl TailnetRpcService {
     #[must_use]
     pub fn with_derp_map_provider(mut self, provider: Arc<dyn DerpMapProvider>) -> Self {
         self.derp_map_provider = provider;
+        self
+    }
+
+    /// Installs the storage-backed workspace lookup used by
+    /// [`TailnetRpcService::workspace_updates`].
+    #[must_use]
+    pub fn with_workspace_lookup(mut self, lookup: Arc<dyn TailnetWorkspaceLookup>) -> Self {
+        self.lookup = lookup;
+        self
+    }
+
+    /// Installs the tailnet coordinator used by
+    /// [`TailnetRpcService::coordinate`].
+    #[must_use]
+    pub fn with_coordinator(mut self, coordinator: Arc<InMemoryCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
         self
     }
 
@@ -323,10 +396,230 @@ impl TailnetRpcService {
     pub fn stream_derp_maps(
         &self,
         _req: tailnet::StreamDerpMapsRequest,
-    ) -> impl futures_util::Stream<Item = Result<tailnet::DerpMap, RpcError>> + Send + 'static {
+    ) -> impl Stream<Item = Result<tailnet::DerpMap, RpcError>> + Send + 'static {
         let snapshot = self.build_current_derp_map();
         stream::iter(snapshot.into_iter().map(Ok::<_, RpcError>))
     }
+
+    /// Builds the initial [`tailnet::WorkspaceUpdate`] for `owner_id` by
+    /// listing the owner's workspaces via the configured
+    /// [`TailnetWorkspaceLookup`]. Emits every row as an `upserted_workspaces`
+    /// entry with `Status::Unknown`.
+    ///
+    /// Agent enumeration (`upserted_agents`) is deferred until the
+    /// agent<->workspace join is wired through the lookup trait — the Go
+    /// reference reads agents via `WorkspaceUpdatesProvider.Subscribe`.
+    pub async fn build_workspace_snapshot(
+        &self,
+        owner_id: Uuid,
+    ) -> Result<tailnet::WorkspaceUpdate, RpcError> {
+        let filter = WorkspaceListFilter {
+            owner_id: Some(owner_id),
+            viewer_id: Some(owner_id),
+            limit: 0,
+            offset: 0,
+            ..Default::default()
+        };
+        let (rows, _) = self
+            .lookup
+            .list_workspaces(filter)
+            .await
+            .map_err(|e| RpcError::Internal(format!("list workspaces: {e}")))?;
+        let upserted_workspaces = rows
+            .into_iter()
+            .map(|w| tailnet::Workspace {
+                id: w.id.as_bytes().to_vec(),
+                name: w.name,
+                status: i32::from(tailnet::workspace::Status::Unknown),
+            })
+            .collect();
+        Ok(tailnet::WorkspaceUpdate {
+            upserted_workspaces,
+            upserted_agents: Vec::new(),
+            deleted_workspaces: Vec::new(),
+            deleted_agents: Vec::new(),
+        })
+    }
+
+    /// Implements `WorkspaceUpdates`. Parses `workspace_owner_id` as a
+    /// UUID, builds the initial snapshot via
+    /// [`TailnetRpcService::build_workspace_snapshot`], and emits it as a
+    /// single-frame stream.
+    ///
+    /// TODO-tailnet-workspace-updates-live: subscribe to a pubsub notifier
+    /// and emit fresh snapshots (or upsert/delete deltas) when the owner's
+    /// workspaces change.
+    pub async fn workspace_updates(
+        &self,
+        req: tailnet::WorkspaceUpdatesRequest,
+    ) -> Result<
+        impl Stream<Item = Result<tailnet::WorkspaceUpdate, RpcError>> + Send + 'static,
+        RpcError,
+    > {
+        let owner_id = uuid_from_bytes(&req.workspace_owner_id, "workspace_owner_id")?;
+        let snapshot = self.build_workspace_snapshot(owner_id).await?;
+        Ok(stream::once(async move { Ok(snapshot) }))
+    }
+
+    /// Implements `Coordinate`. Consumes the first incoming
+    /// [`tailnet::CoordinateRequest`] as a handshake carrying the peer's
+    /// node key, registers the peer with the in-memory coordinator, emits
+    /// one empty ack frame, and parks on the incoming stream until the
+    /// client closes its send-side. On drop the peer is deregistered via
+    /// [`TailnetCoordinator::close_coordination`].
+    ///
+    /// TODO-tailnet-coordinate-node-updates: fan out reactive node-info,
+    /// tunnel-add/remove and ready-for-handshake peer updates from the
+    /// coordinator's response channel. The current implementation only
+    /// completes the handshake.
+    pub fn coordinate(
+        &self,
+        incoming: impl Stream<Item = tailnet::CoordinateRequest> + Send + Unpin + 'static,
+    ) -> impl Stream<Item = Result<tailnet::CoordinateResponse, RpcError>> + Send + 'static {
+        let coordinator = self.coordinator.clone();
+        stream::unfold(
+            CoordinateState::Handshake {
+                incoming,
+                coordinator,
+            },
+            coordinate_step,
+        )
+    }
+}
+
+/// Parses a `bytes` UUID field with a readable error message. Used for
+/// DRPC request decoding.
+fn uuid_from_bytes(raw: &[u8], field: &str) -> Result<Uuid, RpcError> {
+    let bytes: [u8; 16] = raw
+        .try_into()
+        .map_err(|_| RpcError::InvalidArgument(format!("{field}: expected 16 bytes")))?;
+    Ok(Uuid::from_bytes(bytes))
+}
+
+/// Internal state machine for the `coordinate` bidi stream.
+enum CoordinateState<S> {
+    /// Waiting for the first `CoordinateRequest` which must carry
+    /// `update_self.node.key`.
+    Handshake {
+        incoming: S,
+        coordinator: Option<Arc<InMemoryCoordinator>>,
+    },
+    /// Handshake complete; the peer is registered and we are parked on
+    /// the incoming stream. On drop the session is closed.
+    Registered {
+        incoming: S,
+        guard: CoordinateSession,
+    },
+    /// Terminal — the stream will yield `None` on the next poll.
+    Done,
+}
+
+/// RAII guard that deregisters the peer from the coordinator on drop.
+struct CoordinateSession {
+    coordinator: Arc<InMemoryCoordinator>,
+    peer_id: Uuid,
+    session_id: Uuid,
+}
+
+impl Drop for CoordinateSession {
+    fn drop(&mut self) {
+        self.coordinator
+            .close_coordination(self.peer_id, self.session_id);
+    }
+}
+
+async fn coordinate_step<S>(
+    state: CoordinateState<S>,
+) -> Option<(
+    Result<tailnet::CoordinateResponse, RpcError>,
+    CoordinateState<S>,
+)>
+where
+    S: Stream<Item = tailnet::CoordinateRequest> + Send + Unpin + 'static,
+{
+    match state {
+        CoordinateState::Handshake {
+            mut incoming,
+            coordinator,
+        } => {
+            let Some(first) = incoming.next().await else {
+                return Some((
+                    Err(RpcError::InvalidArgument(
+                        "coordinate: client closed before handshake".into(),
+                    )),
+                    CoordinateState::Done,
+                ));
+            };
+            let key = first
+                .update_self
+                .as_ref()
+                .and_then(|u| u.node.as_ref())
+                .map(|n| n.key.as_slice())
+                .unwrap_or_default();
+            if key.is_empty() {
+                return Some((
+                    Err(RpcError::InvalidArgument(
+                        "coordinate: update_self.node.key is required".into(),
+                    )),
+                    CoordinateState::Done,
+                ));
+            }
+            let peer_id = peer_id_from_key(key);
+            let Some(coord) = coordinator else {
+                return Some((
+                    Err(RpcError::Internal(
+                        "coordinate: no tailnet coordinator configured".into(),
+                    )),
+                    CoordinateState::Done,
+                ));
+            };
+            let handle = coord.coordinate(peer_id, peer_id.to_string(), PeerKind::Client);
+            // We intentionally drop `handle.response_rx` here: fan-out of
+            // coordinator-driven updates is deferred
+            // (TODO-tailnet-coordinate-node-updates).
+            drop(handle.response_rx);
+            let guard = CoordinateSession {
+                coordinator: coord,
+                peer_id,
+                session_id: handle.session_id,
+            };
+            // Emit empty ack frame and transition to Registered.
+            Some((
+                Ok(tailnet::CoordinateResponse::default()),
+                CoordinateState::Registered { incoming, guard },
+            ))
+        }
+        CoordinateState::Registered {
+            mut incoming,
+            guard,
+        } => {
+            // Park on the incoming stream until the client closes its
+            // send-side. Additional requests are acknowledged with a
+            // default (empty) response until live fan-out lands.
+            match incoming.next().await {
+                Some(_) => Some((
+                    Ok(tailnet::CoordinateResponse::default()),
+                    CoordinateState::Registered { incoming, guard },
+                )),
+                None => {
+                    // Drop the guard to deregister the peer.
+                    drop(guard);
+                    None
+                }
+            }
+        }
+        CoordinateState::Done => None,
+    }
+}
+
+/// Derive a stable peer id from the SHA-256 of the node's public key.
+/// Bytes 0..16 of the digest are used as the UUID bytes so the mapping
+/// is deterministic and collision-resistant in practice.
+fn peer_id_from_key(key: &[u8]) -> Uuid {
+    let digest = Sha256::digest(key);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
 }
 
 /// Server-stream handler wiring [`TailnetRpcService::stream_derp_maps`]
@@ -358,6 +651,95 @@ impl ServerStreamHandler for StreamDerpMapsHandler {
         let typed = self.service.stream_derp_maps(req);
         let encoded = typed.map(|item| item.map(|msg| msg.encode_to_vec()));
         Ok(Box::pin(encoded))
+    }
+}
+
+/// Server-stream handler wiring
+/// [`TailnetRpcService::workspace_updates`] into the
+/// [`ServerStreamHandler`] DRPC dispatcher. Emits a single
+/// `WorkspaceUpdate` snapshot frame.
+pub struct WorkspaceUpdatesHandler {
+    service: Arc<TailnetRpcService>,
+}
+
+impl WorkspaceUpdatesHandler {
+    /// Wraps `service` so it can be registered against the
+    /// [`WORKSPACE_UPDATES_METHOD`] DRPC path.
+    #[must_use]
+    pub fn new(service: Arc<TailnetRpcService>) -> Self {
+        Self { service }
+    }
+}
+
+#[async_trait]
+impl ServerStreamHandler for WorkspaceUpdatesHandler {
+    async fn invoke(
+        &self,
+        _ctx: RpcContext,
+        request_body: Vec<u8>,
+    ) -> Result<ResponseStream, RpcError> {
+        let req =
+            tailnet::WorkspaceUpdatesRequest::decode(request_body.as_slice()).map_err(|e| {
+                RpcError::InvalidArgument(format!("decode WorkspaceUpdatesRequest: {e}"))
+            })?;
+        let typed = self.service.workspace_updates(req).await?;
+        let encoded = typed.map(|item| item.map(|msg| msg.encode_to_vec()));
+        Ok(Box::pin(encoded))
+    }
+}
+
+/// Bidi-stream handler wiring [`TailnetRpcService::coordinate`] into the
+/// [`BidiStreamHandler`] DRPC dispatcher. Decodes each inbound frame as
+/// a [`tailnet::CoordinateRequest`] and emits encoded
+/// [`tailnet::CoordinateResponse`] frames.
+pub struct CoordinateHandler {
+    service: Arc<TailnetRpcService>,
+}
+
+impl CoordinateHandler {
+    /// Wraps `service` so it can be registered against the
+    /// [`COORDINATE_METHOD`] DRPC path.
+    #[must_use]
+    pub fn new(service: Arc<TailnetRpcService>) -> Self {
+        Self { service }
+    }
+}
+
+#[async_trait]
+impl BidiStreamHandler for CoordinateHandler {
+    async fn invoke(
+        &self,
+        _ctx: RpcContext,
+        mut requests: mpsc::Receiver<Vec<u8>>,
+        sink: BidiResponseSink,
+    ) -> Result<(), RpcError> {
+        // Bridge the raw byte receiver to a decoded `CoordinateRequest`
+        // stream so the service can consume strongly-typed protobufs.
+        let (req_tx, req_rx) = mpsc::unbounded_channel::<tailnet::CoordinateRequest>();
+        tokio::spawn(async move {
+            while let Some(bytes) = requests.recv().await {
+                match tailnet::CoordinateRequest::decode(bytes.as_slice()) {
+                    Ok(msg) => {
+                        if req_tx.send(msg).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "coordinate: malformed request frame");
+                        break;
+                    }
+                }
+            }
+        });
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(req_rx);
+        let mut responses = Box::pin(self.service.coordinate(stream));
+        while let Some(item) = responses.next().await {
+            let payload = item?.encode_to_vec();
+            if sink.send(payload).await.is_err() {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -429,5 +811,150 @@ mod tests {
         };
         assert_eq!(first, map);
         assert!(stream.next().await.is_none(), "stream must end after one");
+    }
+
+    /// Fake workspace lookup seeded with pre-canned rows. Used to drive
+    /// `workspace_updates` in unit tests without a real database.
+    struct FakeLookup {
+        rows: Vec<WorkspaceRecord>,
+    }
+
+    #[async_trait]
+    impl TailnetWorkspaceLookup for FakeLookup {
+        async fn list_workspaces(
+            &self,
+            filter: WorkspaceListFilter,
+        ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+            let rows: Vec<WorkspaceRecord> = self
+                .rows
+                .iter()
+                .filter(|w| filter.owner_id.is_none_or(|o| w.owner_id == o))
+                .cloned()
+                .collect();
+            let total = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+            Ok((rows, total))
+        }
+    }
+
+    fn make_record(owner_id: Uuid, name: &str) -> WorkspaceRecord {
+        let now = OffsetDateTime::now_utc();
+        WorkspaceRecord {
+            id: Uuid::new_v4(),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id,
+            organization_id: Uuid::new_v4(),
+            template_id: Uuid::new_v4(),
+            name: name.to_string(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_string(),
+            favorite: false,
+            next_start_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_updates_emits_initial_snapshot() {
+        let (tx, _rx) = telemetry_channel();
+        let owner_id = Uuid::new_v4();
+        let lookup = Arc::new(FakeLookup {
+            rows: vec![
+                make_record(owner_id, "alpha"),
+                make_record(owner_id, "beta"),
+            ],
+        });
+        let svc = TailnetRpcService::with_stub_key(tx).with_workspace_lookup(lookup);
+        let req = tailnet::WorkspaceUpdatesRequest {
+            workspace_owner_id: owner_id.as_bytes().to_vec(),
+        };
+        let Ok(stream) = svc.workspace_updates(req).await else {
+            unreachable!("workspace_updates must succeed");
+        };
+        let mut stream = Box::pin(stream);
+        let Some(Ok(frame)) = stream.next().await else {
+            unreachable!("expected one WorkspaceUpdate frame");
+        };
+        assert_eq!(frame.upserted_workspaces.len(), 2);
+        let names: Vec<&str> = frame
+            .upserted_workspaces
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(frame.upserted_agents.is_empty());
+        assert!(frame.deleted_workspaces.is_empty());
+        assert!(frame.deleted_agents.is_empty());
+        assert!(
+            stream.next().await.is_none(),
+            "initial snapshot must end after one frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinate_handshake_registers_peer() {
+        let (tx, _rx) = telemetry_channel();
+        let coordinator = InMemoryCoordinator::new(coder_core::api::DERPMap::default());
+        let svc = TailnetRpcService::with_stub_key(tx).with_coordinator(coordinator.clone());
+        let handshake = tailnet::CoordinateRequest {
+            update_self: Some(tailnet::coordinate_request::UpdateSelf {
+                node: Some(tailnet::Node {
+                    key: b"peer-key-0123456789abcdef01234567".to_vec(),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let (req_tx, req_rx) = mpsc::unbounded_channel::<tailnet::CoordinateRequest>();
+        let Ok(()) = req_tx.send(handshake) else {
+            unreachable!("send handshake");
+        };
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(req_rx);
+        let mut responses = Box::pin(svc.coordinate(stream));
+        let Some(Ok(ack)) = responses.next().await else {
+            unreachable!("expected ack frame");
+        };
+        assert!(ack.peer_updates.is_empty());
+        assert!(ack.error.is_empty());
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["total_peers"], 1);
+        // Drop client side to deregister the peer.
+        drop(req_tx);
+        // Drain the responses stream so the drop guard runs.
+        while responses.next().await.is_some() {}
+        drop(responses);
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["total_peers"], 0);
+    }
+
+    #[tokio::test]
+    async fn coordinate_rejects_empty_node_key() {
+        let (tx, _rx) = telemetry_channel();
+        let coordinator = InMemoryCoordinator::new(coder_core::api::DERPMap::default());
+        let svc = TailnetRpcService::with_stub_key(tx).with_coordinator(coordinator);
+        let handshake = tailnet::CoordinateRequest {
+            update_self: Some(tailnet::coordinate_request::UpdateSelf {
+                node: Some(tailnet::Node::default()),
+            }),
+            ..Default::default()
+        };
+        let (req_tx, req_rx) = mpsc::unbounded_channel::<tailnet::CoordinateRequest>();
+        let Ok(()) = req_tx.send(handshake) else {
+            unreachable!("send handshake");
+        };
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(req_rx);
+        let mut responses = Box::pin(svc.coordinate(stream));
+        let Some(first) = responses.next().await else {
+            unreachable!("expected rejection");
+        };
+        let Err(RpcError::InvalidArgument(msg)) = first else {
+            unreachable!("expected InvalidArgument");
+        };
+        assert!(msg.contains("key"));
     }
 }

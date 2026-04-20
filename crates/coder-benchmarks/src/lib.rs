@@ -437,6 +437,7 @@ impl AppStore for BenchStore {
         &self,
         _organization_id: Uuid,
         _user_id: Uuid,
+        _is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
         Err(InsertOrganizationMemberError::Storage(
             StorageError::unavailable("bench stub"),
@@ -2605,5 +2606,19 @@ impl AppStore for BenchStore {
         _organization_id: Uuid,
     ) -> Result<i64, StorageError> {
         Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_template_presets_with_prebuilds(
+        &self,
+    ) -> Result<Vec<coder_core::TemplatePresetWithPrebuild>, StorageError> {
+        // Benchmarks don't exercise the prebuild reconciler; return an
+        // empty snapshot so the reconciler no-ops.
+        Ok(Vec::new())
+    }
+
+    async fn list_running_prebuilt_workspaces(
+        &self,
+    ) -> Result<Vec<coder_core::RunningPrebuiltWorkspace>, StorageError> {
+        Ok(Vec::new())
     }
 }

@@ -2931,6 +2931,7 @@ pub(crate) mod tests {
                 avatar_url: String::new(),
                 email: user.email,
                 global_roles: vec![role],
+                is_idp_controlled: false,
             };
 
             organizations.insert(organization_id, organization);
@@ -3219,6 +3220,7 @@ pub(crate) mod tests {
                         avatar_url: String::new(),
                         email: input.email.clone(),
                         global_roles: Vec::new(),
+                        is_idp_controlled: false,
                     },
                 );
             }
@@ -3859,6 +3861,7 @@ pub(crate) mod tests {
             &self,
             organization_id: Uuid,
             user_id: Uuid,
+            is_idp_controlled: bool,
         ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
             let user = self
                 .users
@@ -3890,6 +3893,7 @@ pub(crate) mod tests {
                 avatar_url: user.avatar_url.clone(),
                 email: user.email.clone(),
                 global_roles: user.roles.clone(),
+                is_idp_controlled,
             };
             members.insert((organization_id, user_id), member.clone());
             drop(members);
@@ -10281,6 +10285,21 @@ pub(crate) mod tests {
                 }
             }
             Ok(total)
+        }
+
+        async fn list_template_presets_with_prebuilds(
+            &self,
+        ) -> Result<Vec<coder_core::TemplatePresetWithPrebuild>, StorageError> {
+            // Empty snapshot keeps the prebuild reconciler as a safe
+            // no-op in tests — matches production behaviour until a
+            // future FakeStore gains preset-config support.
+            Ok(Vec::new())
+        }
+
+        async fn list_running_prebuilt_workspaces(
+            &self,
+        ) -> Result<Vec<coder_core::RunningPrebuiltWorkspace>, StorageError> {
+            Ok(Vec::new())
         }
     }
 
@@ -17533,7 +17552,18 @@ pub(crate) mod tests {
         >,
         Box<dyn Error>,
     > {
-        let url = ws_url(base, path);
+        // Split an optional `?query` off `path` so `ws_url` can set the
+        // path portion via the `Url` API (which discards existing query)
+        // without losing the query supplied by the caller.
+        let (path_only, query) = match path.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (path, None),
+        };
+        let mut url = ws_url(base, path_only);
+        if let Some(q) = query {
+            url.push('?');
+            url.push_str(q);
+        }
         let req = Request::builder()
             .uri(&url)
             .header("Connection", "Upgrade")
@@ -17815,9 +17845,10 @@ pub(crate) mod tests {
         let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
         let mut input_sub = pubsub.subscribe(&input_channel).await?;
 
+        let reconnect_id = Uuid::new_v4();
         let mut ws = connect_ws_to(
             &base_url,
-            &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+            &format!("/api/v2/workspaceagents/{agent_id}/pty?reconnect_id={reconnect_id}"),
             &token,
         )
         .await?;
@@ -19319,6 +19350,328 @@ pub(crate) mod tests {
         assert!(resp.enabled);
         assert_eq!(resp.message, "Scheduled maintenance tonight");
         assert_eq!(resp.background_color, "#ff0000");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // agent_rpc_live — tail 8 RPCs (ReportConnection, resources monitoring ×2,
+    // sub-agents ×3, ReportBoundaryLogs, UpdateAppStatus).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn agent_rpc_live_get_resources_monitoring_configuration_defaults()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let resp = handler
+            .get_resources_monitoring_configuration(
+                agent::GetResourcesMonitoringConfigurationRequest {},
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        // Mirrors Go's static defaults: 20 samples × 10s — the ported
+        // tables are not yet persisted.
+        let cfg = resp.config.ok_or("missing config")?;
+        assert_eq!(cfg.num_datapoints, 20);
+        assert_eq!(cfg.collection_interval_seconds, 10);
+        assert!(resp.memory.is_none());
+        assert!(resp.volumes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_push_resources_monitoring_usage_is_ok() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let _ = handler
+            .push_resources_monitoring_usage(agent::PushResourcesMonitoringUsageRequest {
+                datapoints: vec![],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_connection_rejects_nil_uuid() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let err = handler
+            .report_connection(agent::ReportConnectionRequest {
+                connection: Some(agent::Connection {
+                    id: Uuid::nil().as_bytes().to_vec(),
+                    action: agent::connection::Action::Connect as i32,
+                    r#type: agent::connection::Type::Ssh as i32,
+                    timestamp: None,
+                    ip: "127.0.0.1".to_owned(),
+                    status_code: 0,
+                    reason: None,
+                }),
+            })
+            .await
+            .err()
+            .ok_or("expected error for nil UUID")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_connection_logs_valid_event() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let _ = handler
+            .report_connection(agent::ReportConnectionRequest {
+                connection: Some(agent::Connection {
+                    id: Uuid::new_v4().as_bytes().to_vec(),
+                    action: agent::connection::Action::Connect as i32,
+                    r#type: agent::connection::Type::Vscode as i32,
+                    timestamp: None,
+                    ip: "10.0.0.1".to_owned(),
+                    status_code: 0,
+                    reason: None,
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_boundary_logs_is_ok() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let _ = handler
+            .report_boundary_logs(agent::ReportBoundaryLogsRequest { logs: vec![] })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_list_sub_agents_is_empty_by_default() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let resp = handler
+            .list_sub_agents(agent::ListSubAgentsRequest {})
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(resp.agents.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_create_sub_agent_returns_unimplemented() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let err = handler
+            .create_sub_agent(agent::CreateSubAgentRequest::default())
+            .await
+            .err()
+            .ok_or("expected Unimplemented")?;
+        assert!(matches!(err, RpcError::Unimplemented(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_delete_sub_agent_rejects_nil_uuid() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let err = handler
+            .delete_sub_agent(agent::DeleteSubAgentRequest {
+                id: Uuid::nil().as_bytes().to_vec(),
+            })
+            .await
+            .err()
+            .ok_or("expected error for nil UUID")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_delete_sub_agent_rejects_wrong_parent() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let parent_agent_id = agent_id_from_store(&store)?;
+
+        // Seed a sub-agent whose parent_id points at a *different* parent to
+        // exercise the ownership guard from the Devin AI review of PR #251.
+        let foreign_parent = Uuid::new_v4();
+        let sub_agent_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let sub_row = WorkspaceAgentRow {
+            id: sub_agent_id,
+            parent_id: Some(foreign_parent),
+            created_at: now,
+            updated_at: now,
+            name: "sub".to_owned(),
+            first_connected_at: None,
+            last_connected_at: None,
+            disconnected_at: None,
+            resource_id: Uuid::new_v4(),
+            auth_token: Uuid::new_v4(),
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            directory: String::new(),
+            expanded_directory: String::new(),
+            version: String::new(),
+            api_version: String::new(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "created".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            started_at: None,
+            ready_at: None,
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        };
+        store.insert_agent(sub_row)?;
+
+        let handler = live_handler_for_store(store, parent_agent_id);
+        let err = handler
+            .delete_sub_agent(agent::DeleteSubAgentRequest {
+                id: sub_agent_id.as_bytes().to_vec(),
+            })
+            .await
+            .err()
+            .ok_or("expected parent-mismatch error")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_update_app_status_persists_and_enforces_160_limit()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+
+        // Seed an app tied to the existing agent so the handler can resolve
+        // it by slug.
+        let now = OffsetDateTime::now_utc();
+        let app_row = WorkspaceAppRow {
+            id: Uuid::new_v4(),
+            created_at: now,
+            agent_id,
+            display_name: "My App".to_owned(),
+            icon: String::new(),
+            command: None,
+            url: None,
+            healthcheck_url: String::new(),
+            healthcheck_interval: 0,
+            healthcheck_threshold: 0,
+            health: "healthy".to_owned(),
+            subdomain: false,
+            sharing_level: "owner".to_owned(),
+            slug: "my-app".to_owned(),
+            external: false,
+            display_order: 0,
+            hidden: false,
+            open_in: "slim-window".to_owned(),
+            display_group: None,
+        };
+        store.insert_app(app_row)?;
+
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        // Exactly 160 chars must be accepted — Devin AI review on PR #251
+        // flagged the boundary; the handler rejects only when count > 160.
+        let msg_160 = "a".repeat(160);
+        handler
+            .update_app_status(agent::UpdateAppStatusRequest {
+                slug: "my-app".to_owned(),
+                state: agent::update_app_status_request::AppStatusState::Working as i32,
+                message: msg_160.clone(),
+                uri: String::new(),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let statuses = store
+            .workspace_app_statuses
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, "working");
+        assert_eq!(statuses[0].message, msg_160);
+        drop(statuses);
+
+        // 161 chars must be rejected with the exact wording required by
+        // PR #251 review feedback.
+        let msg_161 = "a".repeat(161);
+        let err = handler
+            .update_app_status(agent::UpdateAppStatusRequest {
+                slug: "my-app".to_owned(),
+                state: agent::update_app_status_request::AppStatusState::Working as i32,
+                message: msg_161,
+                uri: String::new(),
+            })
+            .await
+            .err()
+            .ok_or("expected 161-char rejection")?;
+        match err {
+            RpcError::InvalidArgument(msg) => {
+                assert!(
+                    msg.contains("must be at most 160 characters"),
+                    "wrong wording: {msg}"
+                );
+            }
+            other => return Err(format!("unexpected error: {other:?}").into()),
+        }
         Ok(())
     }
 
@@ -28725,6 +29078,61 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// Workspace rename should also populate the structured per-field
+    /// [`coder_audit::AuditDiff`] via the `AuditWorkspaceView` wrapper and
+    /// `#[derive(Auditable)]`. Mirrors the User profile demo from PR #238
+    /// and exercises the first of the 16 workspace-handler audit sites to
+    /// opt into structured diffs.
+    #[tokio::test]
+    async fn workspace_rename_audit_event_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let old_name = ws.name.clone();
+        let new_name = "renamed-diff-workspace";
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+                &json!({ "name": new_name }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for workspace rename")?;
+
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("rename audit event should carry a structured diff")?;
+        let name_change = diff
+            .changes
+            .get("name")
+            .ok_or("diff should contain a `name` change entry")?;
+        assert_eq!(
+            name_change.old,
+            serde_json::json!(old_name),
+            "diff old-value should match the workspace's prior name"
+        );
+        assert_eq!(
+            name_change.new,
+            serde_json::json!(new_name),
+            "diff new-value should match the requested rename"
+        );
+        assert!(!name_change.secret, "`name` must not be marked as secret");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_favorite_emits_audit_event() -> Result<(), Box<dyn Error>> {
         let (state, store, audit) = test_state_with_memory_audit()?;
@@ -28966,6 +29374,323 @@ pub(crate) mod tests {
         assert!(
             event.summary.contains("notification preferences"),
             "summary should reference notification prefs, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    // =======================================================================
+    // Audit-sweep coverage for user / org-member / workspace-proxy handlers
+    // (gap-doc §B.10.2 / Wave 0 S7 — round 3).
+    //
+    // These tests exercise the handlers end-to-end through the router and
+    // assert that each mutating operation emits an AuditEvent into the
+    // captured MemoryAuditSink with the expected action / resource / target.
+    // =======================================================================
+
+    #[tokio::test]
+    async fn user_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "audit-user@example.com".to_owned(),
+                    username: "audit-user".to_owned(),
+                    name: "Audit User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let new_user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on created user")?
+            .to_owned();
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Create, &new_user_id)
+            .ok_or("expected a Create audit event for user create")?;
+        assert_eq!(event.resource, ResourceKind::User);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_delete_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "audit-del@example.com".to_owned(),
+                    username: "audit-del".to_owned(),
+                    name: "Audit Del".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let new_user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on created user")?
+            .to_owned();
+
+        let response = call(
+            app,
+            authenticated_request(Method::DELETE, "/api/v2/users/audit-del", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &new_user_id)
+            .ok_or("expected a Delete audit event for user delete")?;
+        assert_eq!(event.resource, ResourceKind::User);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_member_add_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a user attached to the org, remove them, then re-add.
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "memberadd@example.com".to_owned(),
+                    username: "memberadd".to_owned(),
+                    name: "Member Add".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        // Remove the user from the org first so the POST re-add is a clean
+        // "Create" event on OrganizationMember.
+        let _del = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/organizations/{organization_id}/members/memberadd"),
+                &session_token,
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{organization_id}/members/memberadd"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let user_id = body
+            .get("user_id")
+            .and_then(Value::as_str)
+            .ok_or("missing user_id on new org member")?
+            .to_owned();
+        let target = format!("{organization_id}:{user_id}");
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Create, &target)
+            .ok_or("expected a Create audit event for org member add")?;
+        assert_eq!(event.resource, ResourceKind::OrganizationMember);
+        assert!(
+            event.summary.contains("added organization member"),
+            "summary should reference add, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_member_role_change_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "memberrole@example.com".to_owned(),
+                    username: "memberrole".to_owned(),
+                    name: "Member Role".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?
+            .to_owned();
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/organizations/{organization_id}/members/memberrole/roles"),
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["organization-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let target = format!("{organization_id}:{user_id}");
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &target)
+            .ok_or("expected a Write audit event for org member role change")?;
+        assert_eq!(event.resource, ResourceKind::OrganizationMember);
+        assert!(
+            event.summary.contains("organization member roles"),
+            "summary should reference role update, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        // Build a MemoryAuditSink-backed AppState with WorkspaceProxy
+        // entitlement pre-applied (enterprise-gated handler).
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let audit_sink = Arc::new(MemoryAuditSink::default());
+        let audit: Arc<dyn AuditSink> = audit_sink.clone();
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let derp_server = coder_connectivity::derp::DerpServer::new(
+            coder_connectivity::derp::NodeKey::new([0u8; 32]),
+        );
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        config.audit_batch_flush_interval_ms = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            derp_server,
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
+        )?;
+
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::WorkspaceProxy
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/workspaceproxies",
+                &session_token,
+                &serde_json::json!({
+                    "name": "audit-proxy",
+                    "display_name": "Audit Proxy",
+                    "icon": "",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let proxy_id = body
+            .get("proxy")
+            .and_then(|p| p.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing proxy.id")?
+            .to_owned();
+
+        let events = await_audit_events(&audit_sink, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Create, &proxy_id)
+            .ok_or("expected a Create audit event for workspace proxy create")?;
+        assert_eq!(event.resource, ResourceKind::WorkspaceProxy);
+        assert!(
+            event.summary.contains("audit-proxy"),
+            "summary should reference proxy name, got: {}",
             event.summary
         );
         Ok(())
@@ -43482,6 +44207,22 @@ mod store_method_tests {
         let links_empty = state.store.list_external_auth_links(Uuid::new_v4()).await?;
         assert!(links_empty.is_empty());
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FakeStore: prebuild reconciler queries return empty snapshots
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_template_presets_with_prebuilds_returns_empty_by_default()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let presets = state.store.list_template_presets_with_prebuilds().await?;
+        assert!(presets.is_empty(), "FakeStore has no preset configuration");
+
+        let running = state.store.list_running_prebuilt_workspaces().await?;
+        assert!(running.is_empty(), "FakeStore has no prebuilt workspaces");
         Ok(())
     }
 }
