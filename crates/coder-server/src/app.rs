@@ -28971,6 +28971,323 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // =======================================================================
+    // Audit-sweep coverage for user / org-member / workspace-proxy handlers
+    // (gap-doc §B.10.2 / Wave 0 S7 — round 3).
+    //
+    // These tests exercise the handlers end-to-end through the router and
+    // assert that each mutating operation emits an AuditEvent into the
+    // captured MemoryAuditSink with the expected action / resource / target.
+    // =======================================================================
+
+    #[tokio::test]
+    async fn user_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "audit-user@example.com".to_owned(),
+                    username: "audit-user".to_owned(),
+                    name: "Audit User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let new_user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on created user")?
+            .to_owned();
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Create, &new_user_id)
+            .ok_or("expected a Create audit event for user create")?;
+        assert_eq!(event.resource, ResourceKind::User);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_delete_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "audit-del@example.com".to_owned(),
+                    username: "audit-del".to_owned(),
+                    name: "Audit Del".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let new_user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on created user")?
+            .to_owned();
+
+        let response = call(
+            app,
+            authenticated_request(Method::DELETE, "/api/v2/users/audit-del", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &new_user_id)
+            .ok_or("expected a Delete audit event for user delete")?;
+        assert_eq!(event.resource, ResourceKind::User);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_member_add_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a user attached to the org, remove them, then re-add.
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "memberadd@example.com".to_owned(),
+                    username: "memberadd".to_owned(),
+                    name: "Member Add".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        // Remove the user from the org first so the POST re-add is a clean
+        // "Create" event on OrganizationMember.
+        let _del = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/organizations/{organization_id}/members/memberadd"),
+                &session_token,
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{organization_id}/members/memberadd"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let user_id = body
+            .get("user_id")
+            .and_then(Value::as_str)
+            .ok_or("missing user_id on new org member")?
+            .to_owned();
+        let target = format!("{organization_id}:{user_id}");
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Create, &target)
+            .ok_or("expected a Create audit event for org member add")?;
+        assert_eq!(event.resource, ResourceKind::OrganizationMember);
+        assert!(
+            event.summary.contains("added organization member"),
+            "summary should reference add, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn organization_member_role_change_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "memberrole@example.com".to_owned(),
+                    username: "memberrole".to_owned(),
+                    name: "Member Role".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?
+            .to_owned();
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/organizations/{organization_id}/members/memberrole/roles"),
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["organization-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let target = format!("{organization_id}:{user_id}");
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &target)
+            .ok_or("expected a Write audit event for org member role change")?;
+        assert_eq!(event.resource, ResourceKind::OrganizationMember);
+        assert!(
+            event.summary.contains("organization member roles"),
+            "summary should reference role update, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        // Build a MemoryAuditSink-backed AppState with WorkspaceProxy
+        // entitlement pre-applied (enterprise-gated handler).
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let audit_sink = Arc::new(MemoryAuditSink::default());
+        let audit: Arc<dyn AuditSink> = audit_sink.clone();
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let derp_server = coder_connectivity::derp::DerpServer::new(
+            coder_connectivity::derp::NodeKey::new([0u8; 32]),
+        );
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        config.audit_batch_flush_interval_ms = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            derp_server,
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
+        )?;
+
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::WorkspaceProxy
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/workspaceproxies",
+                &session_token,
+                &serde_json::json!({
+                    "name": "audit-proxy",
+                    "display_name": "Audit Proxy",
+                    "icon": "",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let proxy_id = body
+            .get("proxy")
+            .and_then(|p| p.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing proxy.id")?
+            .to_owned();
+
+        let events = await_audit_events(&audit_sink, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Create, &proxy_id)
+            .ok_or("expected a Create audit event for workspace proxy create")?;
+        assert_eq!(event.resource, ResourceKind::WorkspaceProxy);
+        assert!(
+            event.summary.contains("audit-proxy"),
+            "summary should reference proxy name, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_port_share_crud() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
