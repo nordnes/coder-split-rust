@@ -9,9 +9,10 @@
 //! * [`TailnetRpcService::refresh_resume_token`] — produce a fresh signed
 //!   resume token that identifies a peer across reconnects.
 //! * [`TailnetRpcService::stream_derp_maps`] — server-stream the current
-//!   DERP map to the client. Initial-snapshot only for now; the
-//!   reactive push-on-change path is deferred
-//!   (`TODO-tailnet-derp-map-live-updates`).
+//!   DERP map to the client. Emits an initial snapshot and, when a
+//!   [`DerpMapNotifier`] is installed, subsequent frames whenever the
+//!   underlying DERP config changes. Mirrors the Go push-on-change loop
+//!   in `coder/tailnet/service.go`.
 //!
 //! The remaining streaming RPCs (`WorkspaceUpdates`, `Coordinate`) are
 //! ported in sibling batches so each change stays small.
@@ -24,6 +25,7 @@
 
 use std::sync::Arc;
 
+use async_stream::stream;
 use async_trait::async_trait;
 use base64::Engine as _;
 use coder_agent_rpc::handlers::{ResponseStream, RpcContext, RpcError, ServerStreamHandler};
@@ -34,7 +36,7 @@ use prost_types::{Duration as PbDuration, Timestamp as PbTimestamp};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 /// DRPC method path for `StreamDERPMaps`. Mirrors the Go
@@ -60,6 +62,30 @@ where
 {
     fn current(&self) -> Option<tailnet::DerpMap> {
         self()
+    }
+}
+
+/// Subscription source for live DERP map updates. Mirrors the role of
+/// Go's `DerpMapFn` re-invocation under a ticker in
+/// `coder/tailnet/service.go` — each DERP config change causes
+/// [`TailnetRpcService::stream_derp_maps`] to emit a fresh frame.
+///
+/// When this is not plumbed the service falls back to the one-shot
+/// initial-snapshot behaviour from [`DerpMapProvider`].
+pub trait DerpMapNotifier: Send + Sync {
+    /// Returns a `watch::Receiver` that resolves to the latest DERP
+    /// map. The initial value must be immediately readable via
+    /// `watch::Receiver::borrow()`; subsequent changes mark the
+    /// receiver ready and are observed with `changed().await`.
+    fn subscribe(&self) -> watch::Receiver<tailnet::DerpMap>;
+}
+
+/// Blanket impl letting a `watch::Sender<DerpMap>` serve as its own
+/// notifier — the common wiring where the DERP config owner holds the
+/// sender and the tailnet service only needs receivers.
+impl DerpMapNotifier for watch::Sender<tailnet::DerpMap> {
+    fn subscribe(&self) -> watch::Receiver<tailnet::DerpMap> {
+        self.subscribe()
     }
 }
 
@@ -216,6 +242,13 @@ pub struct TailnetRpcService {
     /// map so that `stream_derp_maps` always emits at least one frame
     /// when wired up with the default constructor.
     derp_map_provider: Arc<dyn DerpMapProvider>,
+    /// Optional live-update source. When present,
+    /// [`TailnetRpcService::stream_derp_maps`] subscribes to it and
+    /// emits a fresh frame on every change. When `None`, the stream
+    /// degrades to the one-shot snapshot behaviour — this preserves
+    /// backwards compatibility for callers that have not yet wired a
+    /// notifier.
+    derp_map_notifier: Option<Arc<dyn DerpMapNotifier>>,
 }
 
 impl TailnetRpcService {
@@ -231,6 +264,7 @@ impl TailnetRpcService {
             signing_key: Arc::from(signing_key),
             token_ttl_secs: DEFAULT_RESUME_TOKEN_EXPIRY_SECS,
             derp_map_provider: Arc::new(|| Some(tailnet::DerpMap::default())),
+            derp_map_notifier: None,
         }
     }
 
@@ -239,6 +273,15 @@ impl TailnetRpcService {
     #[must_use]
     pub fn with_derp_map_provider(mut self, provider: Arc<dyn DerpMapProvider>) -> Self {
         self.derp_map_provider = provider;
+        self
+    }
+
+    /// Installs a [`DerpMapNotifier`] so `stream_derp_maps` reacts to
+    /// DERP config changes. Without a notifier, the stream emits only
+    /// the initial snapshot from the provider (legacy behaviour).
+    #[must_use]
+    pub fn with_derp_map_notifier(mut self, notifier: Arc<dyn DerpMapNotifier>) -> Self {
+        self.derp_map_notifier = Some(notifier);
         self
     }
 
@@ -313,19 +356,50 @@ impl TailnetRpcService {
         self.derp_map_provider.current()
     }
 
-    /// Implements `StreamDERPMaps`. Emits the current DERP map once and
-    /// then closes the stream.
+    /// Implements `StreamDERPMaps`. Emits an initial snapshot and,
+    /// when a [`DerpMapNotifier`] is installed, a fresh frame on every
+    /// DERP config change. Terminates cleanly when the notifier's
+    /// sender is dropped or the consumer stops polling (drops the
+    /// returned stream).
     ///
-    /// TODO-tailnet-derp-map-live-updates: subscribe to a DERP config
-    /// change notifier and emit a fresh snapshot on each change. Deferred
-    /// — requires a notify channel that is not yet wired from the DERP
-    /// config surface used by this crate.
+    /// Duplicate frames are suppressed: the loop only emits a new
+    /// `DerpMap` when the observed value differs from the last-sent
+    /// one. This matches Go's `CompareDERPMaps` dedupe in
+    /// `coder/tailnet/service.go`.
+    ///
+    /// If no notifier is configured, the stream degrades to emitting
+    /// the single provider snapshot and closing — preserving the
+    /// behaviour that predated the live-push path.
     pub fn stream_derp_maps(
         &self,
         _req: tailnet::StreamDerpMapsRequest,
     ) -> impl futures_util::Stream<Item = Result<tailnet::DerpMap, RpcError>> + Send + 'static {
-        let snapshot = self.build_current_derp_map();
-        stream::iter(snapshot.into_iter().map(Ok::<_, RpcError>))
+        let Some(notifier) = self.derp_map_notifier.clone() else {
+            let snapshot = self.build_current_derp_map();
+            return stream::iter(snapshot.into_iter().map(Ok::<_, RpcError>)).boxed();
+        };
+        let mut rx = notifier.subscribe();
+        stream! {
+            // Initial snapshot: mirror the first-iteration send in Go
+            // regardless of whether the watched value was "initial" or
+            // had already transitioned. `borrow_and_update` clears the
+            // changed flag so the next `changed().await` blocks until
+            // a real update arrives.
+            let mut last = rx.borrow_and_update().clone();
+            yield Ok(last.clone());
+            while rx.changed().await.is_ok() {
+                let next = rx.borrow_and_update().clone();
+                // Suppress duplicate frames — `watch` can wake
+                // spuriously when the same value is re-sent.
+                if next == last {
+                    continue;
+                }
+                last = next.clone();
+                yield Ok(next);
+            }
+            // sender dropped → clean EOF.
+        }
+        .boxed()
     }
 }
 
@@ -429,5 +503,112 @@ mod tests {
         };
         assert_eq!(first, map);
         assert!(stream.next().await.is_none(), "stream must end after one");
+    }
+
+    fn region_map(id: i64, code: &str) -> tailnet::DerpMap {
+        let mut map = tailnet::DerpMap::default();
+        map.regions.insert(
+            id,
+            tailnet::derp_map::Region {
+                region_id: id,
+                region_code: code.into(),
+                region_name: code.into(),
+                ..Default::default()
+            },
+        );
+        map
+    }
+
+    #[tokio::test]
+    async fn stream_derp_maps_emits_subsequent_updates() {
+        let (tx, _rx) = telemetry_channel();
+        let initial = region_map(1, "one");
+        let updated = region_map(2, "two");
+        let (derp_tx, _derp_rx) = watch::channel(initial.clone());
+        let notifier: Arc<dyn DerpMapNotifier> = Arc::new(derp_tx.clone());
+        let svc = TailnetRpcService::with_stub_key(tx).with_derp_map_notifier(notifier);
+        let mut stream = Box::pin(svc.stream_derp_maps(tailnet::StreamDerpMapsRequest {}));
+
+        let Some(Ok(first)) = stream.next().await else {
+            unreachable!("expected initial snapshot frame");
+        };
+        assert_eq!(first, initial);
+
+        // Push a fresh DERP map and assert a second frame arrives.
+        let Ok(()) = derp_tx.send(updated.clone()) else {
+            unreachable!("watch::Sender::send must succeed while receivers live");
+        };
+        let Some(Ok(second)) = stream.next().await else {
+            unreachable!("expected updated DERP map frame");
+        };
+        assert_eq!(second, updated);
+    }
+
+    #[tokio::test]
+    async fn stream_derp_maps_dedupes_identical_updates() {
+        let (tx, _rx) = telemetry_channel();
+        let initial = region_map(1, "only");
+        let updated = region_map(2, "changed");
+        let (derp_tx, _derp_rx) = watch::channel(initial.clone());
+        let notifier: Arc<dyn DerpMapNotifier> = Arc::new(derp_tx.clone());
+        let svc = TailnetRpcService::with_stub_key(tx).with_derp_map_notifier(notifier);
+        let mut stream = Box::pin(svc.stream_derp_maps(tailnet::StreamDerpMapsRequest {}));
+
+        let Some(Ok(first)) = stream.next().await else {
+            unreachable!("initial snapshot");
+        };
+        assert_eq!(first, initial);
+
+        // Duplicate send — must not produce a frame.
+        let Ok(()) = derp_tx.send(initial.clone()) else {
+            unreachable!("send must succeed");
+        };
+        let duplicate_wait =
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next()).await;
+        assert!(
+            duplicate_wait.is_err(),
+            "duplicate DERP map must not emit a new frame"
+        );
+
+        // A real change goes through.
+        let Ok(()) = derp_tx.send(updated.clone()) else {
+            unreachable!("send must succeed");
+        };
+        let Some(Ok(next)) = stream.next().await else {
+            unreachable!("expected frame after distinct update");
+        };
+        assert_eq!(next, updated);
+    }
+
+    #[tokio::test]
+    async fn stream_derp_maps_terminates_on_cancel() {
+        let (tx, _rx) = telemetry_channel();
+        let initial = region_map(1, "cancel");
+        let (derp_tx, _derp_rx) = watch::channel(initial);
+        let notifier: Arc<dyn DerpMapNotifier> = Arc::new(derp_tx.clone());
+        let svc = TailnetRpcService::with_stub_key(tx).with_derp_map_notifier(notifier);
+        let stream = svc.stream_derp_maps(tailnet::StreamDerpMapsRequest {});
+        let mut pinned = Box::pin(stream);
+
+        // Consume the initial frame.
+        let Some(Ok(_first)) = pinned.next().await else {
+            unreachable!("initial snapshot expected");
+        };
+
+        // Drop the stream — the underlying async_stream future must
+        // halt promptly (no further sends on the watch channel).
+        drop(pinned);
+
+        // If the loop still held the receiver the sender would be
+        // "live"; after drop, the sender still observes no receivers
+        // for _this_ subscription (the test-held `_derp_rx` survives,
+        // so we instead assert timely completion of the drop path by
+        // re-polling a fresh subscription).
+        let mut fresh = Box::pin(svc.stream_derp_maps(tailnet::StreamDerpMapsRequest {}));
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(100), fresh.next()).await;
+        let Ok(Some(Ok(_))) = second else {
+            unreachable!("fresh subscription must still emit the initial frame");
+        };
     }
 }

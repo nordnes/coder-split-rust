@@ -807,6 +807,7 @@ dependencies = [
 name = "coder-connectivity"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "base64 0.22.1",
  "coder-agent-rpc",
