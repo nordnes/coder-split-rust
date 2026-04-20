@@ -19,6 +19,7 @@
 
 pub mod idpsync;
 pub mod oauth_login;
+pub mod reconnecting_pty;
 pub mod session_cache;
 
 use std::{

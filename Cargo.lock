@@ -762,6 +762,7 @@ dependencies = [
  "base64 0.22.1",
  "coder-core",
  "coder-rbac",
+ "hmac",
  "http 1.4.0",
  "jsonwebtoken",
  "metrics",
