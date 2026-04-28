@@ -6614,6 +6614,9 @@ pub(crate) mod tests {
             }
 
             filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            // Match the PostgresStore's `LIMIT 50` which mirrors Go's
+            // default `limit` in `handleAuthAndFetchProvisionerJobs`.
+            filtered.truncate(50);
             Ok(filtered)
         }
 

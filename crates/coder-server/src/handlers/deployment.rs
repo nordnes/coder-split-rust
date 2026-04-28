@@ -201,27 +201,11 @@ pub(crate) async fn list_provisioner_daemons(
         .store
         .get_provisioner_daemons_by_organization(org.id)
         .await?;
-    let responses: Vec<coder_core::ProvisionerDaemonResponse> =
-        daemons.iter().map(daemon_record_to_response).collect();
+    let responses: Vec<coder_core::ProvisionerDaemonResponse> = daemons
+        .iter()
+        .map(super::provisioner_keys::daemon_to_response)
+        .collect();
     Ok((StatusCode::OK, Json(responses)).into_response())
-}
-
-/// Converts a [`coder_core::provisioner::ProvisionerDaemonRecord`] to API response.
-fn daemon_record_to_response(
-    d: &coder_core::provisioner::ProvisionerDaemonRecord,
-) -> coder_core::ProvisionerDaemonResponse {
-    coder_core::ProvisionerDaemonResponse {
-        id: d.id,
-        organization_id: d.organization_id,
-        created_at: d.created_at,
-        last_seen_at: d.last_seen_at,
-        name: d.name.clone(),
-        version: d.version.clone(),
-        api_version: d.api_version.clone(),
-        provisioners: d.provisioners.clone(),
-        tags: d.tags.clone(),
-        key_id: d.key_id,
-    }
 }
 
 pub(crate) async fn list_provisioner_jobs(

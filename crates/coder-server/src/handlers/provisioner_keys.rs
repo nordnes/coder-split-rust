@@ -55,7 +55,7 @@ fn key_to_response(record: &ProvisionerKeyRecord) -> ProvisionerKeyResponse {
 }
 
 /// Converts a [`coder_core::provisioner::ProvisionerDaemonRecord`] to API response.
-fn daemon_to_response(
+pub(crate) fn daemon_to_response(
     d: &coder_core::provisioner::ProvisionerDaemonRecord,
 ) -> ProvisionerDaemonResponse {
     ProvisionerDaemonResponse {
